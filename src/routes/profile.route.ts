@@ -1,9 +1,10 @@
 import { Router } from "express";
-import { getAllProfiles } from "../controller/profile.controller";
+import { getAllProfiles, searchProfiles } from "../controller/profile.controller";
 
 const router = Router();
 
 router.get("/", getAllProfiles);
+router.get("/search", searchProfiles);
 
 
 export default router;

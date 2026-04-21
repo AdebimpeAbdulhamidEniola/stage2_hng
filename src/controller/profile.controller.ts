@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import { sendError } from "../utils/response.utils";
 import { findAllProfiles } from "../model/profile.model";
+import { parseNaturalQuery } from "../utils/nlp.utils";
+
 
 const VALID_GENDERS = ["male", "female"];
 const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
@@ -76,6 +78,61 @@ export const getAllProfiles = async (
       min_country_probability: parsedMinCountryProb,
       sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
       order: order as "asc" | "desc" | undefined,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+
+    return res.status(200).json({
+      status: "success",
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+export const searchProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { q, page, limit } = req.query;
+
+    // q is required
+    if (!q || (q as string).trim() === "") {
+      return sendError(res, 400, "Missing or empty query");
+    }
+
+    // parse the natural language query
+    const filters = parseNaturalQuery(q as string);
+
+    // couldn't interpret the query
+    if (!filters) {
+      return res.status(400).json({
+        status: "error",
+        message: "Unable to interpret query",
+      });
+    }
+
+    // parse pagination
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
+
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    // reuse same findAllProfiles model function
+    const result = await findAllProfiles({
+      ...filters,
       page: parsedPage,
       limit: parsedLimit,
     });

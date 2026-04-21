@@ -59,6 +59,7 @@ src/model/profile.model.ts
 src/routes/profile.route.ts
 src/utils/apperror.utils.ts
 src/utils/errorhandler.utils.ts
+src/utils/nlp.utils.ts
 src/utils/notfound.utils.ts
 src/utils/response.utils.ts
 tsconfig.json
@@ -76,47 +77,6 @@ node_modules
 
 .vercel
 .env*.local
-</file>
-
-<file path="package.json">
-{
-  "name": "stage1",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon --exec tsx src/index.ts",
-    "build": "tsc",
-    "start": "node dist/src/index.js",
-    "postinstall": "prisma generate"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "@prisma/adapter-pg": "^7.7.0",
-    "@prisma/client": "^7.7.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "morgan": "^1.10.1",
-    "pg": "^8.20.0",
-    "uuidv7": "^1.2.1"
-  },
-  "devDependencies": {
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/morgan": "^1.9.10",
-    "@types/node": "^25.6.0",
-    "@types/pg": "^8.20.0",
-    "nodemon": "^3.1.14",
-    "prisma": "^7.7.0",
-    "tsup": "^8.5.1",
-    "tsx": "^4.21.0",
-    "typescript": "^6.0.2"
-  }
-}
 </file>
 
 <file path="prisma.config.ts">
@@ -213,68 +173,6 @@ model Profile {
   country_probability Float
   created_at          DateTime @default(now())
 }
-</file>
-
-<file path="prisma/seed.ts">
-import "dotenv/config";
-import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
-import { uuidv7 } from "uuidv7";
-import * as fs from "fs";
-import * as path from "path";
-
-interface SeedProfile {
-  name: string;
-  gender: string;
-  gender_probability: number;
-  age: number;
-  age_group: string;
-  country_id: string;
-  country_name: string;
-  country_probability: number;
-}
-
-interface SeedData {
-  profiles: SeedProfile[];
-}
-
-const connectionString = `${process.env.DATABASE_URL}`;
-const adapter = new PrismaPg({ connectionString });
-const prisma = new PrismaClient({ adapter });
-
-async function main() {
-  const seedDataPath = path.join(__dirname, "../seed_profiles.json");
-  const seedData = JSON.parse(fs.readFileSync(seedDataPath, "utf-8")) as SeedData;
-
-  for (const profile of seedData.profiles) {
-    await prisma.profile.upsert({
-      where: { name: profile.name },
-      update: {},
-      create: {
-        id: uuidv7(),
-        name: profile.name,
-        gender: profile.gender,
-        gender_probability: profile.gender_probability,
-        age: profile.age,
-        age_group: profile.age_group,
-        country_id: profile.country_id,
-        country_name: profile.country_name,
-        country_probability: profile.country_probability,
-      },
-    });
-  }
-
-  
-}
-
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
 </file>
 
 <file path="README.md">
@@ -20718,131 +20616,6 @@ export const createApp = (): Application => {
 };
 </file>
 
-<file path="src/controller/profile.controller.ts">
-import { Request, Response, NextFunction } from "express";
-import { sendSuccess, sendError } from "../utils/response.utils";
-import {findAllPr}
-
-
-const VALID_GENDERS = ["male", "female"];
-const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
-const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
-const VALID_ORDER = ["asc", "desc"];
-
-// export const getProfileById = async (
-//   req: Request<{ id: string }>,
-//   res: Response,
-//   next: NextFunction
-// ) => {
-//   const { id } = req.params;
-
-//   try {
-//     const userProfile = await findProfileById(id);
-
-//     if (!userProfile) {
-//       return sendError(res, 404, "Profile not found");
-//     }
-
-//     return sendSuccess(res, 200, userProfile);
-//   } catch (error) {
-//     next(error);
-//   }
-// };
-
-export const getAllProfiles = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const {
-      gender,
-      age_group,
-      country_id,
-      min_age,
-      max_age,
-      min_gender_probability,
-      min_country_probability,
-      sort_by,
-      order,
-      page,
-      limit,
-    } = req.query;
-
-    // Validate gender
-    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    // Validate age_group
-    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    // Validate sort_by
-    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    // Validate order
-    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    // Parse and validate numeric fields
-    const parsedMinAge = min_age ? Number(min_age) : undefined;
-    const parsedMaxAge = max_age ? Number(max_age) : undefined;
-    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
-    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
-    const parsedPage = page ? Number(page) : undefined;
-    const parsedLimit = limit ? Number(limit) : undefined;
-
-    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    const result = await findAllProfiles({
-      gender: typeof gender === "string" ? gender : undefined,
-      age_group: typeof age_group === "string" ? age_group : undefined,
-      country_id: typeof country_id === "string" ? country_id : undefined,
-      min_age: parsedMinAge,
-      max_age: parsedMaxAge,
-      min_gender_probability: parsedMinGenderProb,
-      min_country_probability: parsedMinCountryProb,
-      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
-      order: order as "asc" | "desc" | undefined,
-      page: parsedPage,
-      limit: parsedLimit,
-    });
-
-    return res.status(200).json({
-      status: "success",
-      page: result.page,
-      limit: result.limit,
-      total: result.total,
-      data: result.data,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-</file>
-
 <file path="src/index.ts">
 import { createApp } from "./config/app.config.js";
 import dotenv from "dotenv";
@@ -20876,108 +20649,6 @@ const prisma = new PrismaClient({ adapter });
 export { prisma };
 </file>
 
-<file path="src/model/profile.model.ts">
-import { prisma } from "../lib/prisma.js";
-
-export interface ProfileFilters {
-  // Basic filters
-  gender?: string;
-  age_group?: string;
-  country_id?: string;
-
-  // Range filters
-  min_age?: number;
-  max_age?: number;
-  min_gender_probability?: number;
-  min_country_probability?: number;
-
-  // Sorting
-  sort_by?: "age" | "created_at" | "gender_probability";
-  order?: "asc" | "desc";
-
-  // Pagination
-  page?: number;
-  limit?: number;
-}
-
-// find profile by id — used for GET /api/profiles/:id
-// export const findProfileById = async (id: string) => {
-//   return await prisma.profile.findUnique({
-//     where: { id },
-//   });
-// };
-
-// find all profiles with filters, sorting, pagination
-export const getAllProfiles = async (filters: ProfileFilters) => {
-  const where = {
-    ...(filters.gender && {
-      gender: { equals: filters.gender, mode: "insensitive" as const },
-    }),
-    ...(filters.age_group && {
-      age_group: { equals: filters.age_group, mode: "insensitive" as const },
-    }),
-    ...(filters.country_id && {
-      country_id: { equals: filters.country_id, mode: "insensitive" as const },
-    }),
-    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
-      age: {
-        ...(filters.min_age !== undefined && { gte: filters.min_age }),
-        ...(filters.max_age !== undefined && { lte: filters.max_age }),
-      },
-    }),
-    ...(filters.min_gender_probability !== undefined && {
-      gender_probability: { gte: filters.min_gender_probability },
-    }),
-    ...(filters.min_country_probability !== undefined && {
-      country_probability: { gte: filters.min_country_probability },
-    }),
-  };
-
-  const page = filters.page ?? 1;
-  const limit = Math.min(filters.limit ?? 10, 50);
-  const skip = (page - 1) * limit;
-
-  const orderBy = filters.sort_by
-    ? { [filters.sort_by]: filters.order ?? "asc" }
-    : { created_at: "asc" as const };
-
-  const [data, total] = await Promise.all([
-    prisma.profile.findMany({
-      where,
-      orderBy,
-      skip,
-      take: limit,
-      select: {
-        id: true,
-        name: true,
-        gender: true,
-        gender_probability: true,
-        age: true,
-        age_group: true,
-        country_id: true,
-        country_name: true,
-        country_probability: true,
-        created_at: true,
-      },
-    }),
-    prisma.profile.count({ where }),
-  ]);
-
-  return { data, total, page, limit };
-};
-</file>
-
-<file path="src/routes/profile.route.ts">
-import { Router } from "express";
-
-const router = Router();
-
-router.get("/", getAllProfiles);
-
-
-export default router;
-</file>
-
 <file path="src/utils/apperror.utils.ts">
 export class AppError extends Error {
   statusCode: number;
@@ -21004,6 +20675,190 @@ export const errorHandler = (err: unknown, req: Request, res: Response, next: Ne
 
   //other general error
   sendError(res, 500, "Internal server error");
+};
+</file>
+
+<file path="src/utils/nlp.utils.ts">
+import { ProfileFilters } from "../model/profile.model";
+
+const COUNTRY_MAP: Record<string, string> = {
+  // A
+  "angola": "AO",
+  "australia": "AU",
+  "algeria": "DZ",
+  // B
+  "burkina faso": "BF",
+  "burundi": "BI",
+  "benin": "BJ",
+  "brazil": "BR",
+  "botswana": "BW",
+  // C
+  "canada": "CA",
+  "dr congo": "CD",
+  "democratic republic of congo": "CD",
+  "democratic republic of the congo": "CD",
+  "central african republic": "CF",
+  "republic of the congo": "CG",
+  "congo": "CG",
+  "ivory coast": "CI",
+  "cote d'ivoire": "CI",
+  "côte d'ivoire": "CI",
+  "cameroon": "CM",
+  "china": "CN",
+  "cape verde": "CV",
+  "comoros": "KM",
+  "chad": "TD",
+  // D
+  "djibouti": "DJ",
+  // E
+  "egypt": "EG",
+  "western sahara": "EH",
+  "eritrea": "ER",
+  "ethiopia": "ET",
+  "equatorial guinea": "GQ",
+  "eswatini": "SZ",
+  // F
+  "france": "FR",
+  // G
+  "gabon": "GA",
+  "united kingdom": "GB",
+  "uk": "GB",
+  "britain": "GB",
+  "ghana": "GH",
+  "gambia": "GM",
+  "guinea": "GN",
+  "guinea-bissau": "GW",
+  "germany": "DE",
+  // I
+  "india": "IN",
+  // J
+  "japan": "JP",
+  // K
+  "kenya": "KE",
+  // L
+  "liberia": "LR",
+  "lesotho": "LS",
+  "libya": "LY",
+  // M
+  "morocco": "MA",
+  "madagascar": "MG",
+  "mali": "ML",
+  "mauritania": "MR",
+  "mauritius": "MU",
+  "malawi": "MW",
+  "mozambique": "MZ",
+  // N
+  "namibia": "NA",
+  "niger": "NE",
+  "nigeria": "NG",
+  // R
+  "rwanda": "RW",
+  // S
+  "sudan": "SD",
+  "sierra leone": "SL",
+  "senegal": "SN",
+  "somalia": "SO",
+  "south sudan": "SS",
+  "sao tome and principe": "ST",
+  "são tomé and príncipe": "ST",
+  "seychelles": "SC",
+  "south africa": "ZA",
+  // T
+  "togo": "TG",
+  "tunisia": "TN",
+  "tanzania": "TZ",
+  // U
+  "uganda": "UG",
+  "united states": "US",
+  "usa": "US",
+  "america": "US",
+  // Z
+  "zambia": "ZM",
+  "zimbabwe": "ZW",
+};
+
+export const parseNaturalQuery = (q: string): ProfileFilters | null => {
+  const query = q.toLowerCase().trim();
+
+  if (!query) return null;
+
+  const filters: ProfileFilters = {};
+  let matched = false;
+
+  // ── Gender ──────────────────────────────────────────
+  const bothGenders = /\b(male and female|female and male|both)\b/.test(query);
+
+  if (!bothGenders) {
+    if (/\b(male|males|man|men)\b/.test(query)) {
+      filters.gender = "male";
+      matched = true;
+    } else if (/\b(female|females|woman|women)\b/.test(query)) {
+      filters.gender = "female";
+      matched = true;
+    }
+  } else {
+    matched = true;
+  }
+
+  // ── Age group / young ───────────────────────────────
+  if (/\byoung\b/.test(query)) {
+    filters.min_age = 16;
+    filters.max_age = 24;
+    matched = true;
+  } else if (/\b(child|children|kid|kids)\b/.test(query)) {
+    filters.age_group = "child";
+    matched = true;
+  } else if (/\b(teenager|teenagers|teen|teens)\b/.test(query)) {
+    filters.age_group = "teenager";
+    matched = true;
+  } else if (/\b(adult|adults)\b/.test(query)) {
+    filters.age_group = "adult";
+    matched = true;
+  } else if (/\b(senior|seniors|elderly|old)\b/.test(query)) {
+    filters.age_group = "senior";
+    matched = true;
+  }
+
+  // ── Age range ────────────────────────────────────────
+  // "above 30" / "over 30" / "older than 30"
+  const aboveMatch = query.match(/\b(?:above|over|older than)\s+(\d+)\b/);
+  if (aboveMatch) {
+    filters.min_age = parseInt(aboveMatch[1]);
+    matched = true;
+  }
+
+  // "below 30" / "under 30" / "younger than 30"
+  const belowMatch = query.match(/\b(?:below|under|younger than)\s+(\d+)\b/);
+  if (belowMatch) {
+    filters.max_age = parseInt(belowMatch[1]);
+    matched = true;
+  }
+
+  // "between 20 and 30"
+  const betweenMatch = query.match(/\bbetween\s+(\d+)\s+and\s+(\d+)\b/);
+  if (betweenMatch) {
+    filters.min_age = parseInt(betweenMatch[1]);
+    filters.max_age = parseInt(betweenMatch[2]);
+    matched = true;
+  }
+
+  // ── Country ──────────────────────────────────────────
+  // Try multi-word country names first (longest match wins)
+  const sortedCountries = Object.keys(COUNTRY_MAP).sort(
+    (a, b) => b.length - a.length
+  );
+
+  for (const countryName of sortedCountries) {
+    if (query.includes(countryName)) {
+      filters.country_id = COUNTRY_MAP[countryName];
+      matched = true;
+      break;
+    }
+  }
+
+  if (!matched) return null;
+
+  return filters;
 };
 </file>
 
@@ -21067,6 +20922,348 @@ export const sendError = (res: Response, statusCode: number, message: string): v
         "node_modules"
     ]
 }
+</file>
+
+<file path="package.json">
+{
+  "name": "stage1",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon --exec tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "postinstall": "prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "morgan": "^1.10.1",
+    "pg": "^8.20.0",
+    "uuidv7": "^1.2.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/morgan": "^1.9.10",
+    "@types/node": "^25.6.0",
+    "@types/pg": "^8.20.0",
+    "nodemon": "^3.1.14",
+    "prisma": "^7.7.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
+</file>
+
+<file path="prisma/seed.ts">
+import "dotenv/config";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "@prisma/client";
+import { uuidv7 } from "uuidv7";
+import * as fs from "fs";
+import * as path from "path";
+
+interface SeedProfile {
+  name: string;
+  gender: string;
+  gender_probability: number;
+  age: number;
+  age_group: string;
+  country_id: string;
+  country_name: string;
+  country_probability: number;
+}
+
+interface SeedData {
+  profiles: SeedProfile[];
+}
+
+const connectionString = `${process.env.DATABASE_URL}`;
+const adapter = new PrismaPg({ connectionString });
+const prisma = new PrismaClient({ adapter });
+
+async function main() {
+  const seedDataPath = path.join(__dirname, "../seed_profiles.json");
+  const seedData = JSON.parse(fs.readFileSync(seedDataPath, "utf-8")) as SeedData;
+
+  await prisma.profile.createMany({
+    data: seedData.profiles.map((profile) => ({
+      id: uuidv7(),
+      name: profile.name,
+      gender: profile.gender,
+      gender_probability: profile.gender_probability,
+      age: profile.age,
+      age_group: profile.age_group,
+      country_id: profile.country_id,
+      country_name: profile.country_name,
+      country_probability: profile.country_probability,
+    })),
+    skipDuplicates: true,
+  });
+
+  console.log("Seeding complete — 2026 profiles inserted");
+}
+
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
+</file>
+
+<file path="src/controller/profile.controller.ts">
+import { Request, Response, NextFunction } from "express";
+import { sendError } from "../utils/response.utils";
+import { findAllProfiles } from "../model/profile.model";
+import { parseNaturalQuery } from "../utils/nlp.utils";
+
+
+const VALID_GENDERS = ["male", "female"];
+const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
+const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
+const VALID_ORDER = ["asc", "desc"];
+
+export const getAllProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const {
+      gender,
+      age_group,
+      country_id,
+      min_age,
+      max_age,
+      min_gender_probability,
+      min_country_probability,
+      sort_by,
+      order,
+      page,
+      limit,
+    } = req.query;
+
+    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const parsedMinAge = min_age ? Number(min_age) : undefined;
+    const parsedMaxAge = max_age ? Number(max_age) : undefined;
+    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
+    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
+
+    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const result = await findAllProfiles({
+      gender: typeof gender === "string" ? gender : undefined,
+      age_group: typeof age_group === "string" ? age_group : undefined,
+      country_id: typeof country_id === "string" ? country_id : undefined,
+      min_age: parsedMinAge,
+      max_age: parsedMaxAge,
+      min_gender_probability: parsedMinGenderProb,
+      min_country_probability: parsedMinCountryProb,
+      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
+      order: order as "asc" | "desc" | undefined,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+
+    return res.status(200).json({
+      status: "success",
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+export const searchProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { q, page, limit } = req.query;
+
+    // q is required
+    if (!q || (q as string).trim() === "") {
+      return sendError(res, 400, "Missing or empty query");
+    }
+
+    // parse the natural language query
+    const filters = parseNaturalQuery(q as string);
+
+    // couldn't interpret the query
+    if (!filters) {
+      return res.status(400).json({
+        status: "error",
+        message: "Unable to interpret query",
+      });
+    }
+
+    // parse pagination
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
+
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    // reuse same findAllProfiles model function
+    const result = await findAllProfiles({
+      ...filters,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+
+    return res.status(200).json({
+      status: "success",
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+</file>
+
+<file path="src/model/profile.model.ts">
+import { prisma } from "../lib/prisma.js";
+
+export interface ProfileFilters {
+  gender?: string;
+  age_group?: string;
+  country_id?: string;
+  min_age?: number;
+  max_age?: number;
+  min_gender_probability?: number;
+  min_country_probability?: number;
+  sort_by?: "age" | "created_at" | "gender_probability";
+  order?: "asc" | "desc";
+  page?: number;
+  limit?: number;
+}
+
+export const findAllProfiles = async (filters: ProfileFilters) => {
+  const where = {
+    ...(filters.gender && {
+      gender: { equals: filters.gender, mode: "insensitive" as const },
+    }),
+    ...(filters.age_group && {
+      age_group: { equals: filters.age_group, mode: "insensitive" as const },
+    }),
+    ...(filters.country_id && {
+      country_id: { equals: filters.country_id, mode: "insensitive" as const },
+    }),
+    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
+      age: {
+        ...(filters.min_age !== undefined && { gte: filters.min_age }),
+        ...(filters.max_age !== undefined && { lte: filters.max_age }),
+      },
+    }),
+    ...(filters.min_gender_probability !== undefined && {
+      gender_probability: { gte: filters.min_gender_probability },
+    }),
+    ...(filters.min_country_probability !== undefined && {
+      country_probability: { gte: filters.min_country_probability },
+    }),
+  };
+
+  const page = filters.page ?? 1;
+  const limit = Math.min(filters.limit ?? 10, 50);
+  const skip = (page - 1) * limit;
+
+  const orderBy = filters.sort_by
+    ? { [filters.sort_by]: filters.order ?? "asc" }
+    : { created_at: "asc" as const };
+
+  const [data, total] = await Promise.all([
+    prisma.profile.findMany({
+      where,
+      orderBy,
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        name: true,
+        gender: true,
+        gender_probability: true,
+        age: true,
+        age_group: true,
+        country_id: true,
+        country_name: true,
+        country_probability: true,
+        created_at: true,
+      },
+    }),
+    prisma.profile.count({ where }),
+  ]);
+
+  return { data, total, page, limit };
+};
+</file>
+
+<file path="src/routes/profile.route.ts">
+import { Router } from "express";
+import { getAllProfiles, searchProfiles } from "../controller/profile.controller";
+
+const router = Router();
+
+router.get("/", getAllProfiles);
+router.get("/search", searchProfiles);
+
+
+export default router;
 </file>
 
 </files>
