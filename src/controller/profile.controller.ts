@@ -1,131 +1,92 @@
 import { Request, Response, NextFunction } from "express";
-import { sendSuccess, sendError } from "../utils/response.utils";
-import { getGenderData } from "../services/genderize.service";
-import { getAgeData } from "../services/agify.service";
-import { getNationData } from "../services/nationalize.service";
-import { uuidv7 } from "uuidv7";
-import { findProfileByName, createProfile, findProfileById, findAllProfiles, deleteProfileById } from "../model/profile.model";
+import { sendError } from "../utils/response.utils";
+import { findAllProfiles } from "../model/profile.model";
 
+const VALID_GENDERS = ["male", "female"];
+const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
+const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
+const VALID_ORDER = ["asc", "desc"];
 
-export const createUserProfile = async (req: Request, res: Response, next: NextFunction) => {
-
-  try {
-    const { name } = req.body
-
-    if (name === undefined) {
-      return sendError(res, 400, "Missing name");
-    }
-
-    if (Array.isArray(name) || typeof name !== "string") {
-      return sendError(res, 422, "Invalid type");
-    }
-
-    if (name.trim() === "") {
-      return sendError(res, 400, "Empty name");
-    }
-
-    if (/^\d+$/.test(name.trim())) {
-      return sendError(res, 422, "Invalid type");
-    }
-
-    //idempotency rule
-    const existingProfile = await findProfileByName(name)
-    if (existingProfile) {
-      return res.status(200).json({
-        "status": "success",
-        "message": "Profile already exists",
-        "data": existingProfile
-      })
-    }
-
-    //Call the 3 API service at once to reduce response time
-    const [genderData, ageData, nationData] = await Promise.all([
-      getGenderData(name),
-      getAgeData(name),
-      getNationData(name),
-    ]);
-
-    const newProfile = await createProfile({
-      id: uuidv7(),
-      name,
-      gender: genderData.gender,
-      gender_probability: genderData.gender_probability,
-      sample_size: genderData.sample_size,
-      age: ageData.age,
-      age_group: ageData.age_group,
-      country_id: nationData.country_id,
-      country_probability: nationData.country_probability,
-    });
-    sendSuccess(res, 201, newProfile)
-  }
-  catch (error) {
-    next(error)
-  }
-} 
-
-
-
-export const getProfileById = async (
-  req: Request<{ id: string }>,
+export const getAllProfiles = async (
+  req: Request,
   res: Response,
   next: NextFunction
 ) => {
-  const { id } = req.params;
-
   try {
-    const userProfile = await findProfileById(id);
+    const {
+      gender,
+      age_group,
+      country_id,
+      min_age,
+      max_age,
+      min_gender_probability,
+      min_country_probability,
+      sort_by,
+      order,
+      page,
+      limit,
+    } = req.query;
 
-    if (!userProfile) {
-      return sendError(res, 404, "Profile not found");
+    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
+      return sendError(res, 422, "Invalid query parameters");
     }
 
-    return sendSuccess(res, 200,  userProfile);
-  } catch (error) {
-    next(error);
-  }
-};
+    const parsedMinAge = min_age ? Number(min_age) : undefined;
+    const parsedMaxAge = max_age ? Number(max_age) : undefined;
+    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
+    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
 
+    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
 
-
-
-export const getAllProfiles = async (req: Request, res: Response, next: NextFunction) => {
-  const { gender, country_id, age_group } = req.query;
-
-  try {
-    const profiles = await findAllProfiles({
+    const result = await findAllProfiles({
       gender: typeof gender === "string" ? gender : undefined,
-      country_id: typeof country_id === "string" ? country_id : undefined,
       age_group: typeof age_group === "string" ? age_group : undefined,
+      country_id: typeof country_id === "string" ? country_id : undefined,
+      min_age: parsedMinAge,
+      max_age: parsedMaxAge,
+      min_gender_probability: parsedMinGenderProb,
+      min_country_probability: parsedMinCountryProb,
+      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
+      order: order as "asc" | "desc" | undefined,
+      page: parsedPage,
+      limit: parsedLimit,
     });
 
     return res.status(200).json({
       status: "success",
-      count: profiles.length,
-      data: profiles,
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      data: result.data,
     });
-  } catch (error) {
-    next(error);
-  }
-};
-
-
-export const deleteProfile = async (
-  req: Request<{ id: string }>,
-  res: Response,
-  next: NextFunction
-) => {
-  const { id } = req.params;
-
-  try {
-    const userProfile = await findProfileById(id);
-
-    if (!userProfile) {
-      return sendError(res, 404, "Profile not found");
-    }
-
-    await deleteProfileById(id);
-
-    return res.status(204).send();
   } catch (error) {
     next(error);
   }

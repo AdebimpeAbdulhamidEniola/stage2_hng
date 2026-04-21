@@ -1,3 +1,5 @@
+import "dotenv/config";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { uuidv7 } from "uuidv7";
 import * as fs from "fs";
@@ -18,7 +20,9 @@ interface SeedData {
   profiles: SeedProfile[];
 }
 
-const prisma = new PrismaClient();
+const connectionString = `${process.env.DATABASE_URL}`;
+const adapter = new PrismaPg({ connectionString });
+const prisma = new PrismaClient({ adapter });
 
 async function main() {
   const seedDataPath = path.join(__dirname, "../seed_profiles.json");

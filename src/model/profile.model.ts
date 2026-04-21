@@ -1,68 +1,73 @@
-// src/model/profile.model.ts
 import { prisma } from "../lib/prisma.js";
 
-
-// find profile by name — used for idempotency check
-export const findProfileByName = async (name: string) => {
-  return await prisma.profile.findUnique({
-    where: { name },
-  });
-};
-
-// find profile by id — used for GET /api/profiles/:id
-export const findProfileById = async (id: string) => {
-  return await prisma.profile.findUnique({
-    where: { id },
-  });
-};
-
-// create a new profile — used for POST /api/profiles
-export const createProfile = async (data: {
-  id: string;
-  name: string;
-  gender: string;
-  gender_probability: number;
-  sample_size: number;
-  age: number;
-  age_group: string;
-  country_id: string;
-  country_probability: number;
-}) => {
-  return await prisma.profile.create({ data });
-};
-
-// find all profiles with optional filters — used for GET /api/profiles
-export const findAllProfiles = async (filters: {
+export interface ProfileFilters {
   gender?: string;
-  country_id?: string;
   age_group?: string;
-}) => {
-  return await prisma.profile.findMany({
-    where: {
-      ...(filters.gender && {
-        gender: { equals: filters.gender, mode: "insensitive" },
-      }),
-      ...(filters.country_id && {
-        country_id: { equals: filters.country_id, mode: "insensitive" },
-      }),
-      ...(filters.age_group && {
-        age_group: { equals: filters.age_group, mode: "insensitive" },
-      }),
-    },
-    select: {
-      id: true,
-      name: true,
-      gender: true,
-      age: true,
-      age_group: true,
-      country_id: true
-    }
-  });
-};
+  country_id?: string;
+  min_age?: number;
+  max_age?: number;
+  min_gender_probability?: number;
+  min_country_probability?: number;
+  sort_by?: "age" | "created_at" | "gender_probability";
+  order?: "asc" | "desc";
+  page?: number;
+  limit?: number;
+}
 
-// delete profile by id — used for DELETE /api/profiles/:id
-export const deleteProfileById = async (id: string) => {
-  return await prisma.profile.delete({
-    where: { id },
-  });
+export const findAllProfiles = async (filters: ProfileFilters) => {
+  const where = {
+    ...(filters.gender && {
+      gender: { equals: filters.gender, mode: "insensitive" as const },
+    }),
+    ...(filters.age_group && {
+      age_group: { equals: filters.age_group, mode: "insensitive" as const },
+    }),
+    ...(filters.country_id && {
+      country_id: { equals: filters.country_id, mode: "insensitive" as const },
+    }),
+    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
+      age: {
+        ...(filters.min_age !== undefined && { gte: filters.min_age }),
+        ...(filters.max_age !== undefined && { lte: filters.max_age }),
+      },
+    }),
+    ...(filters.min_gender_probability !== undefined && {
+      gender_probability: { gte: filters.min_gender_probability },
+    }),
+    ...(filters.min_country_probability !== undefined && {
+      country_probability: { gte: filters.min_country_probability },
+    }),
+  };
+
+  const page = filters.page ?? 1;
+  const limit = Math.min(filters.limit ?? 10, 50);
+  const skip = (page - 1) * limit;
+
+  const orderBy = filters.sort_by
+    ? { [filters.sort_by]: filters.order ?? "asc" }
+    : { created_at: "asc" as const };
+
+  const [data, total] = await Promise.all([
+    prisma.profile.findMany({
+      where,
+      orderBy,
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        name: true,
+        gender: true,
+        gender_probability: true,
+        age: true,
+        age_group: true,
+        country_id: true,
+        country_name: true,
+        country_probability: true,
+        created_at: true,
+      },
+    }),
+    prisma.profile.count({ where }),
+  ]);
+
+  return { data, total, page, limit };
 };

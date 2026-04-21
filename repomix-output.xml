@@ -57,9 +57,6 @@ src/index.ts
 src/lib/prisma.ts
 src/model/profile.model.ts
 src/routes/profile.route.ts
-src/services/agify.service.ts
-src/services/genderize.service.ts
-src/services/nationalize.service.ts
 src/utils/apperror.utils.ts
 src/utils/errorhandler.utils.ts
 src/utils/notfound.utils.ts
@@ -100,7 +97,6 @@ node_modules
   "dependencies": {
     "@prisma/adapter-pg": "^7.7.0",
     "@prisma/client": "^7.7.0",
-    "axios": "^1.15.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
@@ -220,11 +216,12 @@ model Profile {
 </file>
 
 <file path="prisma/seed.ts">
+import "dotenv/config";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { uuidv7 } from "uuidv7";
 import * as fs from "fs";
 import * as path from "path";
-
 
 interface SeedProfile {
   name: string;
@@ -235,51 +232,49 @@ interface SeedProfile {
   country_id: string;
   country_name: string;
   country_probability: number;
-  sample_size?: number;
 }
 
 interface SeedData {
   profiles: SeedProfile[];
 }
 
-const prisma = new PrismaClient();
+const connectionString = `${process.env.DATABASE_URL}`;
+const adapter = new PrismaPg({ connectionString });
+const prisma = new PrismaClient({ adapter });
 
 async function main() {
+  const seedDataPath = path.join(__dirname, "../seed_profiles.json");
+  const seedData = JSON.parse(fs.readFileSync(seedDataPath, "utf-8")) as SeedData;
 
-    //Read the JSON file
+  for (const profile of seedData.profiles) {
+    await prisma.profile.upsert({
+      where: { name: profile.name },
+      update: {},
+      create: {
+        id: uuidv7(),
+        name: profile.name,
+        gender: profile.gender,
+        gender_probability: profile.gender_probability,
+        age: profile.age,
+        age_group: profile.age_group,
+        country_id: profile.country_id,
+        country_name: profile.country_name,
+        country_probability: profile.country_probability,
+      },
+    });
+  }
 
-    const seedDataPath = path.join(__dirname, "../seed_profiles.json");
-    const seedData = JSON.parse(fs.readFileSync(seedDataPath, "utf-8")) as See
-
-    for (const profile of seedData.profiles) {
-        await prisma.profile.upsert({
-            where: { name: profile.name }, // check if this name already exists
-            update: {}, // if it exists, do nothing
-            create: {
-                id: uuidv7(),
-                name: profile.name,
-                gender: profile.gender,
-                gender_probability: profile.gender_probability,
-                age: profile.age,
-                age_group: profile.age_group,
-                country_id: profile.country_id,
-                country_name: profile.country_name,
-                country_probability: profile.country_probability,
-            },
-        });
-
-    }
-
-    main()
-        .catch((e) => {
-            console.error(e);
-            process.exit(1);
-        })
-        .finally(async () => {
-            await prisma.$disconnect();
-        });
-
+  
 }
+
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
 </file>
 
 <file path="README.md">
@@ -20726,132 +20721,122 @@ export const createApp = (): Application => {
 <file path="src/controller/profile.controller.ts">
 import { Request, Response, NextFunction } from "express";
 import { sendSuccess, sendError } from "../utils/response.utils";
-import { getGenderData } from "../services/genderize.service";
-import { getAgeData } from "../services/agify.service";
-import { getNationData } from "../services/nationalize.service";
-import { uuidv7 } from "uuidv7";
-import { findProfileByName, createProfile, findProfileById, findAllProfiles, deleteProfileById } from "../model/profile.model";
+import {findAllPr}
 
 
-export const createUserProfile = async (req: Request, res: Response, next: NextFunction) => {
+const VALID_GENDERS = ["male", "female"];
+const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
+const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
+const VALID_ORDER = ["asc", "desc"];
 
-  try {
-    const { name } = req.body
+// export const getProfileById = async (
+//   req: Request<{ id: string }>,
+//   res: Response,
+//   next: NextFunction
+// ) => {
+//   const { id } = req.params;
 
-    if (name === undefined) {
-      return sendError(res, 400, "Missing name");
-    }
+//   try {
+//     const userProfile = await findProfileById(id);
 
-    if (Array.isArray(name) || typeof name !== "string") {
-      return sendError(res, 422, "Invalid type");
-    }
+//     if (!userProfile) {
+//       return sendError(res, 404, "Profile not found");
+//     }
 
-    if (name.trim() === "") {
-      return sendError(res, 400, "Empty name");
-    }
+//     return sendSuccess(res, 200, userProfile);
+//   } catch (error) {
+//     next(error);
+//   }
+// };
 
-    if (/^\d+$/.test(name.trim())) {
-      return sendError(res, 422, "Invalid type");
-    }
-
-    //idempotency rule
-    const existingProfile = await findProfileByName(name)
-    if (existingProfile) {
-      return res.status(200).json({
-        "status": "success",
-        "message": "Profile already exists",
-        "data": existingProfile
-      })
-    }
-
-    //Call the 3 API service at once to reduce response time
-    const [genderData, ageData, nationData] = await Promise.all([
-      getGenderData(name),
-      getAgeData(name),
-      getNationData(name),
-    ]);
-
-    const newProfile = await createProfile({
-      id: uuidv7(),
-      name,
-      gender: genderData.gender,
-      gender_probability: genderData.gender_probability,
-      sample_size: genderData.sample_size,
-      age: ageData.age,
-      age_group: ageData.age_group,
-      country_id: nationData.country_id,
-      country_probability: nationData.country_probability,
-    });
-    sendSuccess(res, 201, newProfile)
-  }
-  catch (error) {
-    next(error)
-  }
-} 
-
-
-
-export const getProfileById = async (
-  req: Request<{ id: string }>,
+export const getAllProfiles = async (
+  req: Request,
   res: Response,
   next: NextFunction
 ) => {
-  const { id } = req.params;
-
   try {
-    const userProfile = await findProfileById(id);
+    const {
+      gender,
+      age_group,
+      country_id,
+      min_age,
+      max_age,
+      min_gender_probability,
+      min_country_probability,
+      sort_by,
+      order,
+      page,
+      limit,
+    } = req.query;
 
-    if (!userProfile) {
-      return sendError(res, 404, "Profile not found");
+    // Validate gender
+    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
+      return sendError(res, 422, "Invalid query parameters");
     }
 
-    return sendSuccess(res, 200,  userProfile);
-  } catch (error) {
-    next(error);
-  }
-};
+    // Validate age_group
+    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
 
+    // Validate sort_by
+    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
 
+    // Validate order
+    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
 
+    // Parse and validate numeric fields
+    const parsedMinAge = min_age ? Number(min_age) : undefined;
+    const parsedMaxAge = max_age ? Number(max_age) : undefined;
+    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
+    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
 
-export const getAllProfiles = async (req: Request, res: Response, next: NextFunction) => {
-  const { gender, country_id, age_group } = req.query;
+    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
 
-  try {
-    const profiles = await findAllProfiles({
+    const result = await findAllProfiles({
       gender: typeof gender === "string" ? gender : undefined,
-      country_id: typeof country_id === "string" ? country_id : undefined,
       age_group: typeof age_group === "string" ? age_group : undefined,
+      country_id: typeof country_id === "string" ? country_id : undefined,
+      min_age: parsedMinAge,
+      max_age: parsedMaxAge,
+      min_gender_probability: parsedMinGenderProb,
+      min_country_probability: parsedMinCountryProb,
+      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
+      order: order as "asc" | "desc" | undefined,
+      page: parsedPage,
+      limit: parsedLimit,
     });
 
     return res.status(200).json({
       status: "success",
-      count: profiles.length,
-      data: profiles,
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      data: result.data,
     });
-  } catch (error) {
-    next(error);
-  }
-};
-
-
-export const deleteProfile = async (
-  req: Request<{ id: string }>,
-  res: Response,
-  next: NextFunction
-) => {
-  const { id } = req.params;
-
-  try {
-    const userProfile = await findProfileById(id);
-
-    if (!userProfile) {
-      return sendError(res, 404, "Profile not found");
-    }
-
-    await deleteProfileById(id);
-
-    return res.status(204).send();
   } catch (error) {
     next(error);
   }
@@ -20892,191 +20877,105 @@ export { prisma };
 </file>
 
 <file path="src/model/profile.model.ts">
-// src/model/profile.model.ts
 import { prisma } from "../lib/prisma.js";
 
+export interface ProfileFilters {
+  // Basic filters
+  gender?: string;
+  age_group?: string;
+  country_id?: string;
 
-// find profile by name — used for idempotency check
-export const findProfileByName = async (name: string) => {
-  return await prisma.profile.findUnique({
-    where: { name },
-  });
-};
+  // Range filters
+  min_age?: number;
+  max_age?: number;
+  min_gender_probability?: number;
+  min_country_probability?: number;
+
+  // Sorting
+  sort_by?: "age" | "created_at" | "gender_probability";
+  order?: "asc" | "desc";
+
+  // Pagination
+  page?: number;
+  limit?: number;
+}
 
 // find profile by id — used for GET /api/profiles/:id
-export const findProfileById = async (id: string) => {
-  return await prisma.profile.findUnique({
-    where: { id },
-  });
-};
+// export const findProfileById = async (id: string) => {
+//   return await prisma.profile.findUnique({
+//     where: { id },
+//   });
+// };
 
-// create a new profile — used for POST /api/profiles
-export const createProfile = async (data: {
-  id: string;
-  name: string;
-  gender: string;
-  gender_probability: number;
-  sample_size: number;
-  age: number;
-  age_group: string;
-  country_id: string;
-  country_probability: number;
-}) => {
-  return await prisma.profile.create({ data });
-};
+// find all profiles with filters, sorting, pagination
+export const getAllProfiles = async (filters: ProfileFilters) => {
+  const where = {
+    ...(filters.gender && {
+      gender: { equals: filters.gender, mode: "insensitive" as const },
+    }),
+    ...(filters.age_group && {
+      age_group: { equals: filters.age_group, mode: "insensitive" as const },
+    }),
+    ...(filters.country_id && {
+      country_id: { equals: filters.country_id, mode: "insensitive" as const },
+    }),
+    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
+      age: {
+        ...(filters.min_age !== undefined && { gte: filters.min_age }),
+        ...(filters.max_age !== undefined && { lte: filters.max_age }),
+      },
+    }),
+    ...(filters.min_gender_probability !== undefined && {
+      gender_probability: { gte: filters.min_gender_probability },
+    }),
+    ...(filters.min_country_probability !== undefined && {
+      country_probability: { gte: filters.min_country_probability },
+    }),
+  };
 
-// find all profiles with optional filters — used for GET /api/profiles
-export const findAllProfiles = async (filters: {
-  gender?: string;
-  country_id?: string;
-  age_group?: string;
-}) => {
-  return await prisma.profile.findMany({
-    where: {
-      ...(filters.gender && {
-        gender: { equals: filters.gender, mode: "insensitive" },
-      }),
-      ...(filters.country_id && {
-        country_id: { equals: filters.country_id, mode: "insensitive" },
-      }),
-      ...(filters.age_group && {
-        age_group: { equals: filters.age_group, mode: "insensitive" },
-      }),
-    },
-    select: {
-      id: true,
-      name: true,
-      gender: true,
-      age: true,
-      age_group: true,
-      country_id: true
-    }
-  });
-};
+  const page = filters.page ?? 1;
+  const limit = Math.min(filters.limit ?? 10, 50);
+  const skip = (page - 1) * limit;
 
-// delete profile by id — used for DELETE /api/profiles/:id
-export const deleteProfileById = async (id: string) => {
-  return await prisma.profile.delete({
-    where: { id },
-  });
+  const orderBy = filters.sort_by
+    ? { [filters.sort_by]: filters.order ?? "asc" }
+    : { created_at: "asc" as const };
+
+  const [data, total] = await Promise.all([
+    prisma.profile.findMany({
+      where,
+      orderBy,
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        name: true,
+        gender: true,
+        gender_probability: true,
+        age: true,
+        age_group: true,
+        country_id: true,
+        country_name: true,
+        country_probability: true,
+        created_at: true,
+      },
+    }),
+    prisma.profile.count({ where }),
+  ]);
+
+  return { data, total, page, limit };
 };
 </file>
 
 <file path="src/routes/profile.route.ts">
 import { Router } from "express";
-import {
-  createUserProfile,
-  getProfileById,
-  getAllProfiles,
-  deleteProfile,
-} from "../controller/profile.controller";
 
 const router = Router();
 
-router.post("/", createUserProfile);
 router.get("/", getAllProfiles);
-router.get("/:id", getProfileById);
-router.delete("/:id", deleteProfile);
+
 
 export default router;
-</file>
-
-<file path="src/services/agify.service.ts">
-import axios from "axios";
-import { AppError } from "../utils/apperror.utils.js";
-
-interface AgifyResponse {
-  count: number;
-  name: string;
-  age: number;
-}
-
-export const getAgeData = async (name: string) => {
-  const { data } = await axios.get<AgifyResponse>(
-    `https://api.agify.io?name=${name}`,
-  );
-
-  //age group based classification
-  if (!data.age) {
-    throw new AppError("Agify returned an invalid response", 502);
-  }
-  const classifyAgeGroup = (age: number): string => {
-    if (age <= 12) return "child";
-    if (age <= 19) return "teenager";
-    if (age <= 59) return "adult";
-    return "senior";
-  };
-
-  return {
-    age: data.age,
-    age_group: classifyAgeGroup(data.age),
-  };
-};
-</file>
-
-<file path="src/services/genderize.service.ts">
-import axios from "axios"
-import { AppError } from "../utils/apperror.utils.js"
-
-interface GenderizeResponse {
-    count: number,
-    name: string,
-    gender: "male" | "female" | null,
-    probability: number
-}
-
-export const getGenderData = async(name: string) => {
-    const {data} = await axios.get<GenderizeResponse>(
-        `https://api.genderize.io?name=${name}`
-    )
-
-    // edge case check
-  if (!data.gender || data.count === 0) {
-   throw new AppError("Genderize returned an invalid response", 502);
-  }
-
-  return {
-    gender: data.gender,
-    gender_probability: data.probability,
-    sample_size: data.count,
-  };
-}
-</file>
-
-<file path="src/services/nationalize.service.ts">
-import axios from "axios";
-import { AppError } from "../utils/apperror.utils.js";
-
-interface NationalizeResponse {
-  count: number;
-  name: string;
-  country: {
-    country_id: string;
-    probability: number;
-  }[];
-}
-
-export const getNationData = async (name: string) => {
-  const { data } = await axios.get<NationalizeResponse>(
-    `https://api.nationalize.io?name=${name}`,
-  );
-
-  if(!data || !data.country || data.country.length === 0) {
-     throw new AppError("Nationalize returned an invalid response", 502);
-  }
-
-  //pick the country with the highest probability
-  const topCountry = data.country.reduce((prev, curr) =>
-    curr.probability > prev.probability ? curr : prev,
-  );
-
-
-  return {
-    country_id: topCountry.country_id,
-     country_probability: topCountry.probability,
-
-  };
-};
 </file>
 
 <file path="src/utils/apperror.utils.ts">
