@@ -34,6 +34,7 @@ model User {
   avatar_url    String
   role          String    @default("analyst")
   is_active     Boolean   @default(true)
+  refresh_token  String?
   last_login_at DateTime?
   created_at    DateTime  @default(now())
 }
