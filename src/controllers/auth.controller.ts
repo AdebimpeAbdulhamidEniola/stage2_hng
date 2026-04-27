@@ -134,9 +134,9 @@ export const handleCLICallback = async (
       return;
     }
 
-    const tokenData = await exchangeCodeForToken(code, code_verifier, redirect_uri); // ← PASS IT
-    if (!tokenData) {
-      sendError(res, 502, "Token exchange failed");
+    const tokenData = await exchangeCodeForToken(code, code_verifier, redirect_uri);
+    if (!tokenData || (tokenData as any).error) {
+      sendError(res, 502, `Token exchange failed: ${(tokenData as any)?.error || 'Unknown error'}`);
       return;
     }
 

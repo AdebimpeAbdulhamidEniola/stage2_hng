@@ -68,11 +68,11 @@ export const exchangeCodeForToken = async (
       }
     );
 
-    if (data.error) return null;
+    if (data.error) return { error: data.error_description || data.error } as any;
     return data;
-  } catch (error) {
-    console.error("Token exchange failed:", error);
-    return null;
+  } catch (error: any) {
+    console.error("Token exchange failed:", error.response?.data || error.message);
+    return { error: error.response?.data?.error_description || error.response?.data?.error || error.message } as any;
   }
 };
 
