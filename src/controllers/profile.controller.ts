@@ -251,3 +251,33 @@ export const createUserProfile = async (
     next(error);
   }
 };
+
+
+export const exportProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const result = await findAllProfiles({
+      gender: req.query.gender as string,
+      age_group: req.query.age_group as string,
+      country_id: req.query.country_id as string,
+      page: 1,
+      limit: 1000000, // export all matching profiles without pagination
+    });
+
+    const headers = "id,name,gender,gender_probability,age,age_group,country_id,country_probability\n";
+    const rows = result.data
+      .map((p) =>
+        `${p.id},${p.name},${p.gender},${p.gender_probability},${p.age},${p.age_group},${p.country_id},${p.country_probability}`
+      )
+      .join("\n");
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="profiles_${Date.now()}.csv"`);
+    res.status(200).send(headers + rows);
+  } catch (error) {
+    next(error);
+  }
+};
