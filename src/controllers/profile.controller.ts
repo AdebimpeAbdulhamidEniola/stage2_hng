@@ -6,6 +6,7 @@ import {
   findProfileById,
   createProfile,
   findProfileByName,
+  deleteProfile
 } from "../model/profile.model.js";
 import { parseNaturalQuery } from "../utils/nlp.utils.js";
 import { getGenderData } from "../services/genderize.service.js";
@@ -356,3 +357,30 @@ export const exportProfiles = async (
     next(error);
   }
 };
+
+export const deleteUserProfile = async (
+  req: Request<{ id: string }>,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { id } = req.params;
+
+    // Check existence first so we return 404 (not a Prisma crash)
+    const existing = await findProfileById(id);
+    if (!existing) {
+      return sendError(res, 404, "Profile not found");
+    }
+
+    await deleteProfile(id);
+
+    return res.status(200).json({
+      status: "success",
+      message: "Profile deleted successfully",
+    });
+
+  } catch (error) {
+    next(error);
+  }
+} 
+

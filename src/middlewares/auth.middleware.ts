@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyAccessToken } from "../utils/jwt.utils.js";
 import { sendError } from "../utils/response.utils.js";
+import { findUserById } from "../model/auth.model.js";
 
 // Extend Express Request to include user
 declare global {
@@ -12,7 +13,7 @@ declare global {
 }
 
 // Require authentication
-export const authenticate = (req: Request, res: Response, next: NextFunction): void => {
+export const authenticate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
@@ -25,6 +26,13 @@ export const authenticate = (req: Request, res: Response, next: NextFunction): v
   const decoded = verifyAccessToken(token);
   if (!decoded) {
     sendError(res, 401, "Invalid or expired token");
+    return;
+  }
+
+  // Check if user is still active in the database
+  const user = await findUserById(decoded.userId);
+  if (!user || !user.is_active) {
+    sendError(res, 403, "User account is deactivated");
     return;
   }
 

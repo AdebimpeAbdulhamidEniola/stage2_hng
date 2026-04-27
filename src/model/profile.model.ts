@@ -143,3 +143,8 @@ export const createProfile = async (data: {
 export const findProfileByName = (name: string) => {
   return prisma.profile.findUnique({ where: { name } });
 };
+
+
+export const deleteProfile = (id: string) => {
+  return prisma.profile.delete({ where: { id } });
+};

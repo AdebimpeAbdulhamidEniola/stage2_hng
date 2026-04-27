@@ -20483,6 +20483,7 @@ export { prisma };
 import { Request, Response, NextFunction } from "express";
 import { verifyAccessToken } from "../utils/jwt.utils.js";
 import { sendError } from "../utils/response.utils.js";
+import { findUserById } from "../model/auth.model.js";
 
 // Extend Express Request to include user
 declare global {
@@ -20494,7 +20495,7 @@ declare global {
 }
 
 // Require authentication
-export const authenticate = (req: Request, res: Response, next: NextFunction): void => {
+export const authenticate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
@@ -20507,6 +20508,13 @@ export const authenticate = (req: Request, res: Response, next: NextFunction): v
   const decoded = verifyAccessToken(token);
   if (!decoded) {
     sendError(res, 401, "Invalid or expired token");
+    return;
+  }
+
+  // Check if user is still active in the database
+  const user = await findUserById(decoded.userId);
+  if (!user || !user.is_active) {
+    sendError(res, 403, "User account is deactivated");
     return;
   }
 
@@ -20984,6 +20992,10 @@ The system stores 2026 demographic profiles and exposes endpoints that support a
    ```ini
    DATABASE_URL="postgresql://user:password@host/dbname?sslmode=require"
    PORT=3000
+   GITHUB_CLIENT_ID=your_github_client_id
+   GITHUB_CLIENT_SECRET=your_github_client_secret
+   GITHUB_REDIRECT_URI=http://localhost:3000/api/auth/github/callback
+   JWT_SECRET=your_secret_key_here
    ```
 
 4. **Run database migrations:**
@@ -21007,11 +21019,306 @@ The API will be available at `http://localhost:3000`.
 
 ---
 
+## Authentication & Authorization
+
+### Overview
+
+The API uses **GitHub OAuth 2.0 with PKCE** for web clients and **JWT tokens** for API authentication. All profile endpoints require a valid access token and the `api-version` header.
+
+### GitHub OAuth Flow (Web Clients)
+
+1. **Initiate Authentication**
+   ```bash
+   GET /api/auth/github
+   ```
+   Redirects to GitHub's authorization page with PKCE code challenge.
+
+2. **Handle Callback**
+   ```bash
+   GET /api/auth/github/callback?code=<auth_code>&state=<state>
+   ```
+   GitHub redirects here after user approves. The server:
+   - Validates the PKCE code
+   - Exchanges code for GitHub access token
+   - Fetches user profile and email from GitHub
+   - Creates/updates user in database
+   - Returns `access_token` and `refresh_token` in JSON response
+
+3. **Response**
+   ```json
+   {
+     "status": "success",
+     "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+     "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+   }
+   ```
+
+### CLI Usage
+
+CLI applications should use the **direct token exchange** endpoint instead of browser redirect:
+
+1. **Generate Code Verifier Locally**
+   ```bash
+   # CLI generates a random 128-character string
+   code_verifier = "random_128_char_string_here"
+   ```
+
+2. **Generate Code Challenge**
+   ```bash
+   # Compute SHA256(code_verifier) and base64url encode
+   code_challenge = base64url(sha256(code_verifier))
+   ```
+
+3. **Redirect User to GitHub**
+   ```bash
+   https://github.com/login/oauth/authorize?client_id=YOUR_CLIENT_ID&code_challenge=<code_challenge>&code_challenge_method=S256&redirect_uri=http://localhost:3000/cli
+   ```
+
+4. **Exchange Code for Token**
+   ```bash
+   POST /api/auth/cli/callback
+   Content-Type: application/json
+
+   {
+     "code": "<auth_code_from_github>",
+     "code_verifier": "<original_code_verifier>"
+   }
+   ```
+
+5. **Receive Tokens**
+   ```json
+   {
+     "status": "success",
+     "access_token": "...",
+     "refresh_token": "..."
+   }
+   ```
+
+### Token Handling
+
+**Access Token:**
+- **Format:** JWT signed with `JWT_SECRET`
+- **Payload:** `{ userId, role }`
+- **Lifetime:** 1 hour (configurable)
+- **Usage:** Include in `Authorization: Bearer <token>` header on all authenticated requests
+- **Validation:** JWT signature is verified, and `is_active` status is checked on every request
+
+**Refresh Token:**
+- **Format:** JWT signed with `JWT_SECRET`
+- **Payload:** `{ userId }`
+- **Lifetime:** 30 days (configurable)
+- **Storage:** Stored in database per user
+- **Usage:** Call `POST /api/auth/refresh` to get new access token without re-authenticating
+- **Validation:** `is_active` status is checked before issuing a new access token
+
+**Refresh Token Endpoint:**
+```bash
+POST /api/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "<refresh_token>"
+}
+```
+
+Response:
+```json
+{
+  "status": "success",
+  "access_token": "new_jwt_token_here"
+}
+```
+
+### Role Enforcement Logic
+
+Roles are assigned when a user is created in the system:
+- **Default Role:** `user` — can read profiles, perform searches, export data
+- **Admin Role:** `admin` — can do everything + create new profiles
+
+**Admin-Only Endpoints:**
+- `POST /api/profiles` — Create a new profile
+
+The `requireRole("admin")` middleware:
+1. Extracts token from `Authorization: Bearer <token>` header
+2. Verifies JWT signature using `JWT_SECRET`
+3. Checks the `role` claim in the token
+4. Returns 403 Forbidden if user is not an admin
+
+**Example: Admin-only Create Profile**
+```bash
+POST /api/profiles
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+api-version: 1
+Content-Type: application/json
+
+{
+  "name": "John"
+}
+```
+
+### Logout
+
+Invalidates the user's refresh token on the server:
+```bash
+POST /api/auth/logout
+Authorization: Bearer <access_token>
+api-version: 1
+```
+
+Response:
+```json
+{
+  "status": "success",
+  "message": "Logged out successfully"
+}
+```
+
+### Middleware Stack
+
+Every request goes through:
+
+1. **Authentication Middleware** — Validates access token and checks if user is still active (`is_active=true`). If a user is deactivated, returns 403 Forbidden.
+2. **Rate Limiter** — Enforces rate limits per user/IP (separate for auth vs API routes)
+3. **API Version Middleware** — Requires `api-version` header on all profile routes
+4. **Role Middleware** (optional) — Checks role for admin-only endpoints
+
+---
+
 ## Endpoints
 
-### GET /api/profiles
+### Authentication Endpoints
+
+#### GET /api/auth/github
+
+Initiates GitHub OAuth 2.0 flow. Redirects to GitHub's authorization page.
+
+**Example:**
+```bash
+curl -X GET "http://localhost:3000/api/auth/github"
+```
+
+**Response:** HTTP 302 redirect to `github.com/login/oauth/authorize`
+
+---
+
+#### GET /api/auth/github/callback
+
+GitHub's OAuth callback endpoint. Handles the authorization code exchange.
+
+**Query Parameters:**
+- `code` — Authorization code from GitHub
+- `state` — State parameter for PKCE validation
+
+**Example:**
+```bash
+GET http://localhost:3000/api/auth/github/callback?code=abc123&state=xyz789
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+---
+
+#### POST /api/auth/cli/callback
+
+Token exchange endpoint for CLI clients using PKCE.
+
+**Request Body:**
+```json
+{
+  "code": "authorization_code_from_github",
+  "code_verifier": "original_code_verifier_string"
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:3000/api/auth/cli/callback" \
+  -H "Content-Type: application/json" \
+  -H "api-version: 1" \
+  -d '{"code":"abc123","code_verifier":"xyz789"}'
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+---
+
+#### POST /api/auth/refresh
+
+Refreshes an expired access token using a valid refresh token.
+
+**Request Body:**
+```json
+{
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:3000/api/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -H "api-version: 1" \
+  -d '{"refresh_token":"your_refresh_token"}'
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "access_token": "new_jwt_token_here"
+}
+```
+
+---
+
+#### POST /api/auth/logout
+
+Logs out the user by invalidating their refresh token.
+
+**Headers:**
+- `Authorization: Bearer <access_token>` (required)
+- `api-version: 1` (required)
+
+**Example:**
+```bash
+curl -X POST "http://localhost:3000/api/auth/logout" \
+  -H "Authorization: Bearer your_access_token" \
+  -H "api-version: 1"
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Logged out successfully"
+}
+```
+
+---
+
+### Profile Endpoints
+
+#### GET /api/profiles
 
 Returns all profiles with support for filtering, sorting, and pagination.
+
+**Required Headers:**
+- `Authorization: Bearer <access_token>`
+- `api-version: 1`
 
 **Supported query parameters:**
 
@@ -21031,7 +21338,9 @@ Returns all profiles with support for filtering, sorting, and pagination.
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/profiles?gender=male&country_id=NG&min_age=25&sort_by=age&order=desc&page=1&limit=10"
+curl -X GET "http://localhost:3000/api/profiles?gender=male&country_id=NG&min_age=25&sort_by=age&order=desc&page=1&limit=10" \
+  -H "Authorization: Bearer your_access_token" \
+  -H "api-version: 1"
 ```
 
 **Response:**
@@ -21060,9 +21369,13 @@ curl "http://localhost:3000/api/profiles?gender=male&country_id=NG&min_age=25&so
 
 ---
 
-### GET /api/profiles/search
+#### GET /api/profiles/search
 
 Converts a plain English query into structured filters and returns matching profiles.
+
+**Required Headers:**
+- `Authorization: Bearer <access_token>`
+- `api-version: 1`
 
 **Query parameters:**
 
@@ -21074,7 +21387,9 @@ Converts a plain English query into structured filters and returns matching prof
 
 **Example:**
 ```bash
-curl "http://localhost:3000/api/profiles/search?q=young males from nigeria&page=1&limit=10"
+curl -X GET "http://localhost:3000/api/profiles/search?q=young males from nigeria&page=1&limit=10" \
+  -H "Authorization: Bearer your_access_token" \
+  -H "api-version: 1"
 ```
 
 **Response:**
@@ -21098,9 +21413,175 @@ curl "http://localhost:3000/api/profiles/search?q=young males from nigeria&page=
 
 ---
 
+#### GET /api/profiles/:id
+
+Fetches a single profile by its unique ID.
+
+**Required Headers:**
+- `Authorization: Bearer <access_token>`
+- `api-version: 1`
+
+**URL Parameters:**
+- `id` — Profile ID (UUIDv7)
+
+**Example:**
+```bash
+curl -X GET "http://localhost:3000/api/profiles/b3f9c1e2-7d4a-4c91-9c2a-1f0a8e5b6d12" \
+  -H "Authorization: Bearer your_access_token" \
+  -H "api-version: 1"
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "b3f9c1e2-7d4a-4c91-9c2a-1f0a8e5b6d12",
+    "name": "emmanuel",
+    "gender": "male",
+    "gender_probability": 0.99,
+    "age": 34,
+    "age_group": "adult",
+    "country_id": "NG",
+    "country_name": "Nigeria",
+    "country_probability": 0.85,
+    "created_at": "2026-04-01T12:00:00.000Z"
+  }
+}
+```
+
+**Error (Not Found):**
+```json
+{
+  "status": "error",
+  "message": "Profile not found"
+}
+```
+
+---
+
+#### POST /api/profiles
+
+Creates a new profile by querying external demographic APIs. **Admin only.**
+
+**Required Headers:**
+- `Authorization: Bearer <admin_access_token>`
+- `api-version: 1`
+- `Content-Type: application/json`
+
+**Request Body:**
+```json
+{
+  "name": "John"
+}
+```
+
+**Validation Rules:**
+- `name` field is required
+- Must be a non-empty string
+- Cannot be purely numeric
+- Profile is not created if name already exists in database (returns 200 with existing profile)
+
+**Example:**
+```bash
+curl -X POST "http://localhost:3000/api/profiles" \
+  -H "Authorization: Bearer your_admin_access_token" \
+  -H "api-version: 1" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"John"}'
+```
+
+**Response (New Profile Created):**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "new-uuidv7-here",
+    "name": "John",
+    "gender": "male",
+    "gender_probability": 0.95,
+    "age": 28,
+    "age_group": "adult",
+    "country_id": "US",
+    "country_name": "United States",
+    "country_probability": 0.87,
+    "created_at": "2026-04-27T12:00:00.000Z"
+  }
+}
+```
+
+**Response (Profile Already Exists):**
+```json
+{
+  "status": "success",
+  "message": "Profile already exists",
+  "data": { ... }
+}
+```
+
+**Error (Missing Name):**
+```json
+{
+  "status": "error",
+  "message": "Missing name"
+}
+```
+
+---
+
+#### GET /api/profiles/export
+
+Exports profiles as CSV with optional filtering and sorting.
+
+**Required Headers:**
+- `Authorization: Bearer <access_token>`
+- `api-version: 1`
+
+**Query Parameters:**
+- `format` — `csv` (required)
+- `gender` — Optional: `male` or `female`
+- `age_group` — Optional: `child`, `teenager`, `adult`, `senior`
+- `country_id` — Optional: ISO 2-letter code
+- `min_age` — Optional: minimum age
+- `max_age` — Optional: maximum age
+- `min_gender_probability` — Optional: minimum confidence score
+- `min_country_probability` — Optional: minimum confidence score
+- `sort_by` — Optional: `age`, `created_at`, `gender_probability`
+- `order` — Optional: `asc` or `desc`
+- `limit` — Optional: max records to export (default: all)
+
+**Example:**
+```bash
+curl -X GET "http://localhost:3000/api/profiles/export?format=csv&gender=female&age_group=adult&limit=100" \
+  -H "Authorization: Bearer your_access_token" \
+  -H "api-version: 1" \
+  -o profiles.csv
+```
+
+**Response (CSV Format):**
+```csv
+id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at
+b3f9c1e2-7d4a-4c91-9c2a-1f0a8e5b6d12,emma,female,0.98,26,adult,NG,Nigeria,0.82,2026-04-01T12:00:00.000Z
+...
+```
+
+**Headers:**
+- `Content-Type: text/csv`
+- `Content-Disposition: attachment; filename=profiles.csv`
+
+**Error (Invalid Format):**
+```json
+{
+  "status": "error",
+  "message": "format=csv is required"
+}
+```
+
+---
+
 ## Natural Language Parsing Approach
 
-The parser is **fully rule-based** — no AI or LLMs are used at any point. It works by lowercasing the query string and scanning for known keywords using regular expressions, in five sequential steps:
+The parser is **fully rule-based** — no AI or LLMs are used at any point. It works by lowercasing the query string and scanning for known keywords using regular expressions, in six sequential steps:
 
 **Step 1 — Clean input**  
 Lowercases and trims the query so `"Nigeria"`, `"NIGERIA"`, and `"nigeria"` all behave identically.
@@ -21188,12 +21669,93 @@ All errors follow this structure:
 { "status": "error", "message": "<error message>" }
 ```
 
+### HTTP Status Codes
+
 | Status Code | Meaning |
 |---|---|
-| 400 | Missing or empty parameter |
-| 422 | Invalid parameter type or value |
+| 400 | Missing or empty parameter, invalid request |
+| 401 | Missing or invalid authentication token |
+| 403 | Forbidden — insufficient permissions (e.g. non-admin trying to create profile), missing API version header |
 | 404 | Profile not found |
-| 500 / 502 | Server failure |
+| 422 | Invalid parameter type or value |
+| 429 | Rate limit exceeded (too many requests) |
+| 500 | Internal server error |
+| 502 | Bad gateway (external API failure, e.g., GitHub API down) |
+
+### Common Error Examples
+
+**Missing Authentication Token:**
+```json
+{
+  "status": "error",
+  "message": "No token provided"
+}
+```
+
+**Invalid Token:**
+```json
+{
+  "status": "error",
+  "message": "Invalid token"
+}
+```
+
+**Missing API Version Header:**
+```json
+{
+  "status": "error",
+  "message": "api-version header is required"
+}
+```
+
+**Insufficient Permissions:**
+```json
+{
+  "status": "error",
+  "message": "Insufficient permissions"
+}
+```
+
+**Rate Limit Exceeded:**
+```json
+{
+  "status": "error",
+  "message": "Too many requests"
+}
+```
+
+---
+
+## Testing
+
+A comprehensive Postman collection is included for testing all endpoints: `HNG-Backend-Tests.postman_collection.json`
+
+### Import the Collection
+
+1. Open Postman
+2. Click **File** → **Import**
+3. Select `HNG-Backend-Tests.postman_collection.json`
+4. Create or select an environment with these variables:
+   - `base_url`: `http://localhost:3000`
+   - `access_token`: Your JWT access token
+   - `refresh_token`: Your JWT refresh token
+   - `profile_id`: A valid profile ID from the database
+
+### Test Scenarios Included
+
+- ✅ **Authentication Flow** — GitHub OAuth, token refresh, logout
+- ✅ **Profile Retrieval** — Get all, filter, sort, paginate
+- ✅ **Profile Search** — Natural language queries
+- ✅ **Profile Creation** — Admin-only create endpoint
+- ✅ **Profile Export** — CSV export with filters
+- ✅ **Error Handling** — Missing auth, invalid tokens, rate limits
+- ✅ **Input Validation** — Invalid types, missing fields, invalid parameters
+
+### Run Tests
+
+1. Select the collection in Postman
+2. Click **▶ Run** (or Run Collection)
+3. All tests include assertions that validate response structure and status codes
 
 ---
 
@@ -21475,292 +22037,6 @@ export const logout = async (
 };
 </file>
 
-<file path="src/controllers/profile.controller.ts">
-import { Request, Response, NextFunction } from "express";
-import { sendError } from "../utils/response.utils";
-import { findAllProfiles,findProfileById, createProfile, findProfileByName } from "../model/profile.model";
-import { parseNaturalQuery } from "../utils/nlp.utils";
-import { getGenderData } from "../services/genderize.service";
-import { getAgeData } from "../services/agify.service";
-import { getNationData } from "../services/nationalize.service";
-import { uuidv7 } from "uuidv7";
-
-
-const VALID_GENDERS = ["male", "female"];
-const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
-const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
-const VALID_ORDER = ["asc", "desc"];
-
-export const getAllProfiles = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const {
-      gender,
-      age_group,
-      country_id,
-      min_age,
-      max_age,
-      min_gender_probability,
-      min_country_probability,
-      sort_by,
-      order,
-      page,
-      limit,
-    } = req.query;
-
-    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    const parsedMinAge = min_age ? Number(min_age) : undefined;
-    const parsedMaxAge = max_age ? Number(max_age) : undefined;
-    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
-    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
-    const parsedPage = page ? Number(page) : undefined;
-    const parsedLimit = limit ? Number(limit) : undefined;
-
-    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    const result = await findAllProfiles({
-      gender: typeof gender === "string" ? gender : undefined,
-      age_group: typeof age_group === "string" ? age_group : undefined,
-      country_id: typeof country_id === "string" ? country_id : undefined,
-      min_age: parsedMinAge,
-      max_age: parsedMaxAge,
-      min_gender_probability: parsedMinGenderProb,
-      min_country_probability: parsedMinCountryProb,
-      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
-      order: order as "asc" | "desc" | undefined,
-      page: parsedPage,
-      limit: parsedLimit,
-    });
-
-    return res.status(200).json({
-      status: "success",
-      page: result.page,
-      limit: result.limit,
-      total: result.total,
-      total_pages: Math.ceil(result.total / result.limit),
-      links: {
-        self: `/api/profiles?page=${result.page}&limit=${result.limit}`,
-        next: result.page < Math.ceil(result.total / result.limit)
-          ? `/api/profiles?page=${result.page + 1}&limit=${result.limit}`
-          : null,
-        prev: result.page > 1
-          ? `/api/profiles?page=${result.page - 1}&limit=${result.limit}`
-          : null,
-      },
-      data: result.data,
-
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-
-export const searchProfiles = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const { q, page, limit } = req.query;
-
-    // q is required
-    if (!q || (q as string).trim() === "") {
-      return sendError(res, 400, "Missing or empty query");
-    }
-
-    // parse the natural language query
-    const filters = parseNaturalQuery(q as string);
-
-    // couldn't interpret the query
-    if (!filters) {
-      return res.status(400).json({
-        status: "error",
-        message: "Unable to interpret query",
-      });
-    }
-
-    // parse pagination
-    const parsedPage = page ? Number(page) : undefined;
-    const parsedLimit = limit ? Number(limit) : undefined;
-
-    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    // reuse same findAllProfiles model function
-    const result = await findAllProfiles({
-      ...filters,
-      page: parsedPage,
-      limit: parsedLimit,
-    });
-
-    return res.status(200).json({
-      status: "success",
-      page: result.page,
-      limit: result.limit,
-      total: result.total,
-      total_pages: Math.ceil(result.total / result.limit),
-      links: {
-        self: `/api/profiles?page=${result.page}&limit=${result.limit}`,
-        next: result.page < Math.ceil(result.total / result.limit)
-          ? `/api/profiles?page=${result.page + 1}&limit=${result.limit}`
-          : null,
-        prev: result.page > 1
-          ? `/api/profiles?page=${result.page - 1}&limit=${result.limit}`
-          : null,
-      },
-      data: result.data,
-
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-//get profile by id 
-export const getProfileById = async (
-  req: Request<{id: string}>,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const { id } = req.params;
-
-    const profile = await findProfileById(id);
-
-    if (!profile) {
-      return sendError(res, 404, "Profile not found");
-    }
-
-    return res.status(200).json({
-      status: "success",
-      data: profile,
-    });
-  } catch (error) {
-    next(error);
-  }
-
-}
-
-
-
-export const createUserProfile = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const { name } = req.body;
-
-    if (name === undefined) return sendError(res, 400, "Missing name");
-    if (Array.isArray(name) || typeof name !== "string") return sendError(res, 422, "Invalid type");
-    if (name.trim() === "") return sendError(res, 400, "Empty name");
-    if (/^\d+$/.test(name.trim())) return sendError(res, 422, "Invalid type");
-
-    // idempotency — same name returns existing profile instead of calling APIs again
-    const existingProfile = await findProfileByName(name);
-    if (existingProfile) {
-      return res.status(200).json({
-        status: "success",
-        message: "Profile already exists",
-        data: existingProfile,
-      });
-    }
-
-    // call all 3 external APIs in parallel — faster than sequential
-    const [genderData, ageData, nationData] = await Promise.all([
-      getGenderData(name),
-      getAgeData(name),
-      getNationData(name),
-    ]);
-
-    const newProfile = await createProfile({
-      id: uuidv7(),
-      name,
-      gender: genderData.gender,
-      gender_probability: genderData.gender_probability,
-      age: ageData.age,
-      age_group: ageData.age_group,
-      country_id: nationData.country_id,
-      country_probability: nationData.country_probability,
-    });
-
-    return res.status(201).json({
-      status: "success",
-      data: newProfile,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-
-export const exportProfiles = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const result = await findAllProfiles({
-      gender: req.query.gender as string,
-      age_group: req.query.age_group as string,
-      country_id: req.query.country_id as string,
-      page: 1,
-      limit: 1000000, // export all matching profiles without pagination
-    });
-
-    const headers = "id,name,gender,gender_probability,age,age_group,country_id,country_probability\n";
-    const rows = result.data
-      .map((p) =>
-        `${p.id},${p.name},${p.gender},${p.gender_probability},${p.age},${p.age_group},${p.country_id},${p.country_probability}`
-      )
-      .join("\n");
-
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename="profiles_${Date.now()}.csv"`);
-    res.status(200).send(headers + rows);
-  } catch (error) {
-    next(error);
-  }
-};
-</file>
-
 <file path="src/middlewares/apiversion.middleware.ts">
 import { Request, Response, NextFunction } from "express";
 import { sendError } from "../utils/response.utils";
@@ -21775,6 +22051,7 @@ export const requireApiVersion = (req: Request, res: Response, next: NextFunctio
 </file>
 
 <file path="src/middlewares/ratelimit.middleware.ts">
+import { Request } from "express";
 import rateLimit from "express-rate-limit";
 
 export const authRateLimiter = rateLimit({
@@ -21787,6 +22064,7 @@ export const apiRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   message: { status: "error", message: "Too many requests" },
+  keyGenerator: (req: Request) => req.user?.userId ?? req.ip ?? "unknown",
 });
 </file>
 
@@ -21818,12 +22096,133 @@ router.post("/logout", authenticate, logout);
 export default router;
 </file>
 
+<file path="prisma/seed.ts">
+import "dotenv/config";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "@prisma/client";
+import { uuidv7 } from "uuidv7";
+import * as fs from "fs";
+import * as path from "path";
+
+interface SeedProfile {
+  name: string;
+  gender: string;
+  gender_probability: number;
+  age: number;
+  age_group: string;
+  country_id: string;
+  country_name: string;
+  country_probability: number;
+}
+
+interface SeedData {
+  profiles: SeedProfile[];
+}
+
+const connectionString = `${process.env.DATABASE_URL}`;
+const adapter = new PrismaPg({ connectionString });
+const prisma = new PrismaClient({ adapter });
+
+async function main() {
+  const seedDataPath = path.join(__dirname, "../seed_profiles.json");
+  const seedData = JSON.parse(fs.readFileSync(seedDataPath, "utf-8")) as SeedData;
+
+  await prisma.profile.createMany({
+    data: seedData.profiles.map((profile) => ({
+      id: uuidv7(),
+      name: profile.name,
+      gender: profile.gender,
+      gender_probability: profile.gender_probability,
+      age: profile.age,
+      age_group: profile.age_group,
+      country_id: profile.country_id,
+      country_name: profile.country_name,
+      country_probability: profile.country_probability,
+    })),
+    skipDuplicates: true,
+  });
+
+  console.log("Seeding complete — 2026 profiles inserted");
+}
+
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
+</file>
+
+<file path="src/services/agify.service.ts">
+import axios from "axios";
+import { AppError } from "../utils/apperror.utils.js";
+
+interface AgifyResponse {
+  count: number;
+  name: string;
+  age: number;
+}
+
+export const getAgeData = async (name: string) => {
+  const { data } = await axios.get<AgifyResponse>(
+    `https://api.agify.io?name=${name}`,
+  );
+
+  //age group based classification
+  if (!data.age) {
+    throw new AppError("Agify returned an invalid response", 502);
+  }
+  const classifyAgeGroup = (age: number): string => {
+    if (age <= 12) return "child";
+    if (age <= 19) return "teenager";
+    if (age <= 59) return "adult";
+    return "senior";
+  };
+
+  return {
+    age: data.age,
+    age_group: classifyAgeGroup(data.age),
+  };
+};
+</file>
+
+<file path="src/services/genderize.service.ts">
+import axios from "axios"
+import { AppError } from "../utils/apperror.utils.js"
+
+interface GenderizeResponse {
+    count: number,
+    name: string,
+    gender: "male" | "female" | null,
+    probability: number
+}
+
+export const getGenderData = async(name: string) => {
+    const {data} = await axios.get<GenderizeResponse>(
+        `https://api.genderize.io?name=${name}`
+    )
+
+    // edge case check
+  if (!data.gender || data.count === 0) {
+   throw new AppError("Genderize returned an invalid response", 502);
+  }
+
+  return {
+    gender: data.gender,
+    gender_probability: data.probability,
+    sample_size: data.count,
+  };
+}
+</file>
+
 <file path="src/services/github.services.ts">
 import axios from "axios";
 
-const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
-const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
-const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || "http://localhost:3000/auth/github/callback";
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID as string;
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET as string;
+const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI as string;
 
 
 export interface GitHubUser {
@@ -21933,232 +22332,6 @@ export const fetchGitHubEmail = async (accessToken: string): Promise<string | nu
     return null;
   }
 };
-</file>
-
-<file path="prisma/seed.ts">
-import "dotenv/config";
-import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
-import { uuidv7 } from "uuidv7";
-import * as fs from "fs";
-import * as path from "path";
-
-interface SeedProfile {
-  name: string;
-  gender: string;
-  gender_probability: number;
-  age: number;
-  age_group: string;
-  country_id: string;
-  country_name: string;
-  country_probability: number;
-}
-
-interface SeedData {
-  profiles: SeedProfile[];
-}
-
-const connectionString = `${process.env.DATABASE_URL}`;
-const adapter = new PrismaPg({ connectionString });
-const prisma = new PrismaClient({ adapter });
-
-async function main() {
-  const seedDataPath = path.join(__dirname, "../seed_profiles.json");
-  const seedData = JSON.parse(fs.readFileSync(seedDataPath, "utf-8")) as SeedData;
-
-  await prisma.profile.createMany({
-    data: seedData.profiles.map((profile) => ({
-      id: uuidv7(),
-      name: profile.name,
-      gender: profile.gender,
-      gender_probability: profile.gender_probability,
-      age: profile.age,
-      age_group: profile.age_group,
-      country_id: profile.country_id,
-      country_name: profile.country_name,
-      country_probability: profile.country_probability,
-    })),
-    skipDuplicates: true,
-  });
-
-  console.log("Seeding complete — 2026 profiles inserted");
-}
-
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
-</file>
-
-<file path="src/model/profile.model.ts">
-import { prisma } from "../lib/prisma.js";
-
-export interface ProfileFilters {
-  gender?: string;
-  age_group?: string;
-  country_id?: string;
-  min_age?: number;
-  max_age?: number;
-  min_gender_probability?: number;
-  min_country_probability?: number;
-  sort_by?: "age" | "created_at" | "gender_probability";
-  order?: "asc" | "desc";
-  page?: number;
-  limit?: number;
-}
-
-export const findAllProfiles = async (filters: ProfileFilters) => {
-  const where = {
-    ...(filters.gender && {
-      gender: { equals: filters.gender, mode: "insensitive" as const },
-    }),
-    ...(filters.age_group && {
-      age_group: { equals: filters.age_group, mode: "insensitive" as const },
-    }),
-    ...(filters.country_id && {
-      country_id: { equals: filters.country_id, mode: "insensitive" as const },
-    }),
-    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
-      age: {
-        ...(filters.min_age !== undefined && { gte: filters.min_age }),
-        ...(filters.max_age !== undefined && { lte: filters.max_age }),
-      },
-    }),
-    ...(filters.min_gender_probability !== undefined && {
-      gender_probability: { gte: filters.min_gender_probability },
-    }),
-    ...(filters.min_country_probability !== undefined && {
-      country_probability: { gte: filters.min_country_probability },
-    }),
-  };
-
-  const page = filters.page ?? 1;
-  const limit = Math.min(filters.limit ?? 10, 50);
-  const skip = (page - 1) * limit;
-
-  const orderBy = filters.sort_by
-    ? { [filters.sort_by]: filters.order ?? "asc" }
-    : { created_at: "asc" as const };
-
-  const [data, total] = await Promise.all([
-    prisma.profile.findMany({
-      where,
-      orderBy,
-      skip,
-      take: limit,
-      select: {
-        id: true,
-        name: true,
-        gender: true,
-        gender_probability: true,
-        age: true,
-        age_group: true,
-        country_id: true,
-        country_name: true,
-        country_probability: true,
-        created_at: true,
-      },
-    }),
-    prisma.profile.count({ where }),
-  ]);
-
-  return { data, total, page, limit };
-};
-
-
-//Get profile by ID
-export const findProfileById = (id: string) => {
-  return prisma.profile.findUnique({ where: { id } });
-}
-
-
-
-export const createProfile = async (data: {
-  id: string;
-  name: string;
-  gender: string;
-  gender_probability: number;
-  age: number;
-  age_group: string;
-  country_id: string;
-  country_name?: string | null;
-  country_probability: number;
-}) => {
-  return await prisma.profile.create({ data });
-};
-
-
-
-
-export const findProfileByName = (name: string) => {
-  return prisma.profile.findUnique({ where: { name } });
-};
-</file>
-
-<file path="src/services/agify.service.ts">
-import axios from "axios";
-import { AppError } from "../utils/apperror.utils.js";
-
-interface AgifyResponse {
-  count: number;
-  name: string;
-  age: number;
-}
-
-export const getAgeData = async (name: string) => {
-  const { data } = await axios.get<AgifyResponse>(
-    `https://api.agify.io?name=${name}`,
-  );
-
-  //age group based classification
-  if (!data.age) {
-    throw new AppError("Agify returned an invalid response", 502);
-  }
-  const classifyAgeGroup = (age: number): string => {
-    if (age <= 12) return "child";
-    if (age <= 19) return "teenager";
-    if (age <= 59) return "adult";
-    return "senior";
-  };
-
-  return {
-    age: data.age,
-    age_group: classifyAgeGroup(data.age),
-  };
-};
-</file>
-
-<file path="src/services/genderize.service.ts">
-import axios from "axios"
-import { AppError } from "../utils/apperror.utils.js"
-
-interface GenderizeResponse {
-    count: number,
-    name: string,
-    gender: "male" | "female" | null,
-    probability: number
-}
-
-export const getGenderData = async(name: string) => {
-    const {data} = await axios.get<GenderizeResponse>(
-        `https://api.genderize.io?name=${name}`
-    )
-
-    // edge case check
-  if (!data.gender || data.count === 0) {
-   throw new AppError("Genderize returned an invalid response", 502);
-  }
-
-  return {
-    gender: data.gender,
-    gender_probability: data.probability,
-    sample_size: data.count,
-  };
-}
 </file>
 
 <file path="src/services/nationalize.service.ts">
@@ -22286,17 +22459,564 @@ model User {
 }
 </file>
 
+<file path="src/controllers/profile.controller.ts">
+import { Request, Response, NextFunction } from "express";
+import { sendError } from "../utils/response.utils.js";
+import {
+  findAllProfiles,
+  findAllProfilesForExport,
+  findProfileById,
+  createProfile,
+  findProfileByName,
+  deleteProfile
+} from "../model/profile.model.js";
+import { parseNaturalQuery } from "../utils/nlp.utils.js";
+import { getGenderData } from "../services/genderize.service.js";
+import { getAgeData } from "../services/agify.service.js";
+import { getNationData } from "../services/nationalize.service.js";
+import { uuidv7 } from "uuidv7";
+
+const VALID_GENDERS = ["male", "female"];
+const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
+const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
+const VALID_ORDER = ["asc", "desc"];
+
+// Safely wraps a CSV cell — quotes the value if it contains commas, quotes, or newlines
+const escapeCSV = (value: unknown): string => {
+  const str = value === null || value === undefined ? "" : String(value);
+  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+};
+
+export const getAllProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const {
+      gender,
+      age_group,
+      country_id,
+      min_age,
+      max_age,
+      min_gender_probability,
+      min_country_probability,
+      sort_by,
+      order,
+      page,
+      limit,
+    } = req.query;
+
+    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const parsedMinAge = min_age ? Number(min_age) : undefined;
+    const parsedMaxAge = max_age ? Number(max_age) : undefined;
+    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
+    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
+
+    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const result = await findAllProfiles({
+      gender: typeof gender === "string" ? gender : undefined,
+      age_group: typeof age_group === "string" ? age_group : undefined,
+      country_id: typeof country_id === "string" ? country_id : undefined,
+      min_age: parsedMinAge,
+      max_age: parsedMaxAge,
+      min_gender_probability: parsedMinGenderProb,
+      min_country_probability: parsedMinCountryProb,
+      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
+      order: order as "asc" | "desc" | undefined,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+
+    const totalPages = Math.ceil(result.total / result.limit);
+
+    return res.status(200).json({
+      status: "success",
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      total_pages: totalPages,
+      links: {
+        self: `/api/profiles?page=${result.page}&limit=${result.limit}`,
+        next: result.page < totalPages
+          ? `/api/profiles?page=${result.page + 1}&limit=${result.limit}`
+          : null,
+        prev: result.page > 1
+          ? `/api/profiles?page=${result.page - 1}&limit=${result.limit}`
+          : null,
+      },
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const searchProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { q, page, limit } = req.query;
+
+    if (!q || (q as string).trim() === "") {
+      return sendError(res, 400, "Missing or empty query");
+    }
+
+    const filters = parseNaturalQuery(q as string);
+
+    if (!filters) {
+      return res.status(400).json({
+        status: "error",
+        message: "Unable to interpret query",
+      });
+    }
+
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
+
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const result = await findAllProfiles({
+      ...filters,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+
+    const totalPages = Math.ceil(result.total / result.limit);
+
+    return res.status(200).json({
+      status: "success",
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      total_pages: totalPages,
+      links: {
+        self: `/api/profiles/search?page=${result.page}&limit=${result.limit}`,
+        next: result.page < totalPages
+          ? `/api/profiles/search?page=${result.page + 1}&limit=${result.limit}`
+          : null,
+        prev: result.page > 1
+          ? `/api/profiles/search?page=${result.page - 1}&limit=${result.limit}`
+          : null,
+      },
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getProfileById = async (
+  req: Request<{ id: string }>,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { id } = req.params;
+
+    const profile = await findProfileById(id);
+
+    if (!profile) {
+      return sendError(res, 404, "Profile not found");
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: profile,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const createUserProfile = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { name } = req.body;
+
+    if (name === undefined) return sendError(res, 400, "Missing name");
+    if (Array.isArray(name) || typeof name !== "string") return sendError(res, 422, "Invalid type");
+    if (name.trim() === "") return sendError(res, 400, "Empty name");
+    if (/^\d+$/.test(name.trim())) return sendError(res, 422, "Invalid type");
+
+    const existingProfile = await findProfileByName(name);
+    if (existingProfile) {
+      return res.status(200).json({
+        status: "success",
+        message: "Profile already exists",
+        data: existingProfile,
+      });
+    }
+
+    const [genderData, ageData, nationData] = await Promise.all([
+      getGenderData(name),
+      getAgeData(name),
+      getNationData(name),
+    ]);
+
+    const newProfile = await createProfile({
+      id: uuidv7(),
+      name,
+      gender: genderData.gender,
+      gender_probability: genderData.gender_probability,
+      age: ageData.age,
+      age_group: ageData.age_group,
+      country_id: nationData.country_id,
+      country_probability: nationData.country_probability,
+    });
+
+    return res.status(201).json({
+      status: "success",
+      data: newProfile,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const exportProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const {
+      format,
+      gender,
+      age_group,
+      country_id,
+      min_age,
+      max_age,
+      min_gender_probability,
+      min_country_probability,
+      sort_by,
+      order,
+    } = req.query;
+
+    // Validate format param
+    if (format !== "csv") {
+      return sendError(res, 400, "format=csv is required");
+    }
+
+    // Validate optional filter params
+    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const parsedMinAge = min_age ? Number(min_age) : undefined;
+    const parsedMaxAge = max_age ? Number(max_age) : undefined;
+    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
+    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
+
+    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    // Fetch ALL matching profiles — no pagination cap
+    const profiles = await findAllProfilesForExport({
+      gender: typeof gender === "string" ? gender : undefined,
+      age_group: typeof age_group === "string" ? age_group : undefined,
+      country_id: typeof country_id === "string" ? country_id : undefined,
+      min_age: parsedMinAge,
+      max_age: parsedMaxAge,
+      min_gender_probability: parsedMinGenderProb,
+      min_country_probability: parsedMinCountryProb,
+      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
+      order: order as "asc" | "desc" | undefined,
+    });
+
+    // TRD column order: id, name, gender, gender_probability, age, age_group,
+    //                   country_id, country_name, country_probability, created_at
+    const header = "id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at";
+
+    const rows = profiles.map((p) =>
+      [
+        escapeCSV(p.id),
+        escapeCSV(p.name),
+        escapeCSV(p.gender),
+        escapeCSV(p.gender_probability),
+        escapeCSV(p.age),
+        escapeCSV(p.age_group),
+        escapeCSV(p.country_id),
+        escapeCSV(p.country_name),
+        escapeCSV(p.country_probability),
+        escapeCSV(p.created_at.toISOString()),
+      ].join(",")
+    );
+
+    const csv = [header, ...rows].join("\n");
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="profiles_${Date.now()}.csv"`
+    );
+    return res.status(200).send(csv);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const deleteUserProfile = async (
+  req: Request<{ id: string }>,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { id } = req.params;
+
+    // Check existence first so we return 404 (not a Prisma crash)
+    const existing = await findProfileById(id);
+    if (!existing) {
+      return sendError(res, 404, "Profile not found");
+    }
+
+    await deleteProfile(id);
+
+    return res.status(200).json({
+      status: "success",
+      message: "Profile deleted successfully",
+    });
+
+  } catch (error) {
+    next(error);
+  }
+}
+</file>
+
+<file path="src/model/profile.model.ts">
+import { prisma } from "../lib/prisma.js";
+
+export interface ProfileFilters {
+  gender?: string;
+  age_group?: string;
+  country_id?: string;
+  min_age?: number;
+  max_age?: number;
+  min_gender_probability?: number;
+  min_country_probability?: number;
+  sort_by?: "age" | "created_at" | "gender_probability";
+  order?: "asc" | "desc";
+  page?: number;
+  limit?: number;
+}
+
+export const findAllProfiles = async (filters: ProfileFilters) => {
+  const where = {
+    ...(filters.gender && {
+      gender: { equals: filters.gender, mode: "insensitive" as const },
+    }),
+    ...(filters.age_group && {
+      age_group: { equals: filters.age_group, mode: "insensitive" as const },
+    }),
+    ...(filters.country_id && {
+      country_id: { equals: filters.country_id, mode: "insensitive" as const },
+    }),
+    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
+      age: {
+        ...(filters.min_age !== undefined && { gte: filters.min_age }),
+        ...(filters.max_age !== undefined && { lte: filters.max_age }),
+      },
+    }),
+    ...(filters.min_gender_probability !== undefined && {
+      gender_probability: { gte: filters.min_gender_probability },
+    }),
+    ...(filters.min_country_probability !== undefined && {
+      country_probability: { gte: filters.min_country_probability },
+    }),
+  };
+
+  const page = filters.page ?? 1;
+  const limit = Math.min(filters.limit ?? 10, 50);
+  const skip = (page - 1) * limit;
+
+  const orderBy = filters.sort_by
+    ? { [filters.sort_by]: filters.order ?? "asc" }
+    : { created_at: "asc" as const };
+
+  const [data, total] = await Promise.all([
+    prisma.profile.findMany({
+      where,
+      orderBy,
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        name: true,
+        gender: true,
+        gender_probability: true,
+        age: true,
+        age_group: true,
+        country_id: true,
+        country_name: true,
+        country_probability: true,
+        created_at: true,
+      },
+    }),
+    prisma.profile.count({ where }),
+  ]);
+
+  return { data, total, page, limit };
+};
+
+// Separate export query — no pagination cap, fetches everything matching filters
+export const findAllProfilesForExport = async (
+  filters: Omit<ProfileFilters, "page" | "limit">
+) => {
+  const where = {
+    ...(filters.gender && {
+      gender: { equals: filters.gender, mode: "insensitive" as const },
+    }),
+    ...(filters.age_group && {
+      age_group: { equals: filters.age_group, mode: "insensitive" as const },
+    }),
+    ...(filters.country_id && {
+      country_id: { equals: filters.country_id, mode: "insensitive" as const },
+    }),
+    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
+      age: {
+        ...(filters.min_age !== undefined && { gte: filters.min_age }),
+        ...(filters.max_age !== undefined && { lte: filters.max_age }),
+      },
+    }),
+    ...(filters.min_gender_probability !== undefined && {
+      gender_probability: { gte: filters.min_gender_probability },
+    }),
+    ...(filters.min_country_probability !== undefined && {
+      country_probability: { gte: filters.min_country_probability },
+    }),
+  };
+
+  const orderBy = filters.sort_by
+    ? { [filters.sort_by]: filters.order ?? "asc" }
+    : { created_at: "asc" as const };
+
+  return prisma.profile.findMany({
+    where,
+    orderBy,
+    select: {
+      id: true,
+      name: true,
+      gender: true,
+      gender_probability: true,
+      age: true,
+      age_group: true,
+      country_id: true,
+      country_name: true,
+      country_probability: true,
+      created_at: true,
+    },
+  });
+};
+
+export const findProfileById = (id: string) => {
+  return prisma.profile.findUnique({ where: { id } });
+};
+
+export const createProfile = async (data: {
+  id: string;
+  name: string;
+  gender: string;
+  gender_probability: number;
+  age: number;
+  age_group: string;
+  country_id: string;
+  country_name?: string | null;
+  country_probability: number;
+}) => {
+  return await prisma.profile.create({ data });
+};
+
+export const findProfileByName = (name: string) => {
+  return prisma.profile.findUnique({ where: { name } });
+};
+
+
+export const deleteProfile = (id: string) => {
+  return prisma.profile.delete({ where: { id } });
+};
+</file>
+
 <file path="src/routes/profile.route.ts">
 import { Router } from "express";
-import { getAllProfiles, searchProfiles , getProfileById, createUserProfile, exportProfiles } from "../controllers/profile.controller";
-import { authenticate, requireRole } from "@/middlewares/auth.middleware";
-import { apiRateLimiter } from "@/middlewares/ratelimit.middleware";
-import { requireApiVersion } from "@/middlewares/apiversion.middleware";
-
-
+import {
+  getAllProfiles,
+  searchProfiles,
+  getProfileById,
+  createUserProfile,
+  exportProfiles,
+  deleteUserProfile
+} from "../controllers/profile.controller.js";
+import { authenticate, requireRole } from "../middlewares/auth.middleware.js";
+import { apiRateLimiter } from "../middlewares/ratelimit.middleware.js";
+import { requireApiVersion } from "../middlewares/apiversion.middleware.js";
 
 const router = Router();
 
+// All profile routes require authentication, rate limiting, and API version header
 router.use(authenticate);
 router.use(apiRateLimiter);
 router.use(requireApiVersion);
@@ -22306,7 +23026,7 @@ router.get("/search", searchProfiles);
 router.get("/export", exportProfiles);
 router.get("/:id", getProfileById);
 router.post("/", requireRole("admin"), createUserProfile);
-
+router.delete("/:id", requireRole("admin"), deleteUserProfile);
 
 export default router;
 </file>

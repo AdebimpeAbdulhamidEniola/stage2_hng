@@ -5,6 +5,7 @@ import {
   getProfileById,
   createUserProfile,
   exportProfiles,
+  deleteUserProfile
 } from "../controllers/profile.controller.js";
 import { authenticate, requireRole } from "../middlewares/auth.middleware.js";
 import { apiRateLimiter } from "../middlewares/ratelimit.middleware.js";
@@ -22,5 +23,6 @@ router.get("/search", searchProfiles);
 router.get("/export", exportProfiles);
 router.get("/:id", getProfileById);
 router.post("/", requireRole("admin"), createUserProfile);
+router.delete("/:id", requireRole("admin"), deleteUserProfile);
 
 export default router;
