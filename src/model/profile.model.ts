@@ -72,13 +72,59 @@ export const findAllProfiles = async (filters: ProfileFilters) => {
   return { data, total, page, limit };
 };
 
+// Separate export query — no pagination cap, fetches everything matching filters
+export const findAllProfilesForExport = async (
+  filters: Omit<ProfileFilters, "page" | "limit">
+) => {
+  const where = {
+    ...(filters.gender && {
+      gender: { equals: filters.gender, mode: "insensitive" as const },
+    }),
+    ...(filters.age_group && {
+      age_group: { equals: filters.age_group, mode: "insensitive" as const },
+    }),
+    ...(filters.country_id && {
+      country_id: { equals: filters.country_id, mode: "insensitive" as const },
+    }),
+    ...((filters.min_age !== undefined || filters.max_age !== undefined) && {
+      age: {
+        ...(filters.min_age !== undefined && { gte: filters.min_age }),
+        ...(filters.max_age !== undefined && { lte: filters.max_age }),
+      },
+    }),
+    ...(filters.min_gender_probability !== undefined && {
+      gender_probability: { gte: filters.min_gender_probability },
+    }),
+    ...(filters.min_country_probability !== undefined && {
+      country_probability: { gte: filters.min_country_probability },
+    }),
+  };
 
-//Get profile by ID
+  const orderBy = filters.sort_by
+    ? { [filters.sort_by]: filters.order ?? "asc" }
+    : { created_at: "asc" as const };
+
+  return prisma.profile.findMany({
+    where,
+    orderBy,
+    select: {
+      id: true,
+      name: true,
+      gender: true,
+      gender_probability: true,
+      age: true,
+      age_group: true,
+      country_id: true,
+      country_name: true,
+      country_probability: true,
+      created_at: true,
+    },
+  });
+};
+
 export const findProfileById = (id: string) => {
   return prisma.profile.findUnique({ where: { id } });
-}
-
-
+};
 
 export const createProfile = async (data: {
   id: string;
@@ -93,9 +139,6 @@ export const createProfile = async (data: {
 }) => {
   return await prisma.profile.create({ data });
 };
-
-
-
 
 export const findProfileByName = (name: string) => {
   return prisma.profile.findUnique({ where: { name } });
