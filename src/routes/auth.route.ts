@@ -4,7 +4,7 @@ import {
   handleGitHubCallback,
   handleCLICallback,
   refreshAccessToken,
-  logout,
+  logout,getMe
 } from "../controllers/auth.controller";
 import { authenticate } from "../middlewares/auth.middleware";
 import { authRateLimiter } from "../middlewares/ratelimit.middleware";
@@ -18,6 +18,7 @@ router.get("/github", initiateGitHubAuth);
 router.get("/github/callback", handleGitHubCallback);
 router.post("/cli/callback", handleCLICallback);
 router.post("/refresh", refreshAccessToken);
+router.get("/me", authenticate, getMe);
 
 // logout requires a valid access token — you must be logged in to log out
 router.post("/logout", authenticate, logout);

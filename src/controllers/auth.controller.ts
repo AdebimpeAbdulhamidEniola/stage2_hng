@@ -186,6 +186,17 @@ export const refreshAccessToken = async (
   }
 };
 
+
+//the cli endpoint for whoami
+export const getMe = async (req: Request, res: Response): Promise<void> => {
+  const user = await findUserById(req.user!.userId);
+  if (!user) { sendError(res, 404, "User not found"); return; }
+  res.status(200).json({
+    status: "success",
+    ...user, // username, email, role, is_active, created_at, avatar_url
+  });
+};
+
 export const logout = async (
   req: Request,
   res: Response,
