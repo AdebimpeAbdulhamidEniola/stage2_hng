@@ -47,6 +47,7 @@ prisma/migrations/20260420173623_add_country_name/migration.sql
 prisma/migrations/20260420190454_remove_sample_size/migration.sql
 prisma/migrations/20260426060614_add_user/migration.sql
 prisma/migrations/20260426132235_add_column/migration.sql
+prisma/migrations/20260427072532_make_country_name_optional/migration.sql
 prisma/migrations/migration_lock.toml
 prisma/schema.prisma
 prisma/seed.ts
@@ -57,13 +58,17 @@ src/controllers/auth.controller.ts
 src/controllers/profile.controller.ts
 src/index.ts
 src/lib/prisma.ts
+src/middlewares/apiversion.middleware.ts
 src/middlewares/auth.middleware.ts
 src/middlewares/ratelimit.middleware.ts
 src/model/auth.model.ts
 src/model/profile.model.ts
 src/routes/auth.route.ts
 src/routes/profile.route.ts
+src/services/agify.service.ts
+src/services/genderize.service.ts
 src/services/github.services.ts
+src/services/nationalize.service.ts
 src/utils/apperror.utils.ts
 src/utils/errorhandler.utils.ts
 src/utils/jwt.utils.ts
@@ -77,129 +82,21 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
-<file path="src/middlewares/auth.middleware.ts">
+<file path="prisma/migrations/20260427072532_make_country_name_optional/migration.sql">
+-- AlterTable
+ALTER TABLE "Profile" ALTER COLUMN "country_name" DROP NOT NULL;
+</file>
+
+<file path="src/middlewares/apiversion.middleware.ts">
 import { Request, Response, NextFunction } from "express";
-import { verifyAccessToken } from "../utils/jwt.utils.js";
 import { sendError } from "../utils/response.utils.js";
 
-// Extend Express Request to include user
-declare global {
-  namespace Express {
-    interface Request {
-      user?: { userId: string; role: string };
-    }
-  }
-}
-
-// Require authentication
-export const authenticate = (req: Request, res: Response, next: NextFunction): void => {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader?.startsWith("Bearer ")) {
-    sendError(res, 401, "Authentication required");
+export const requireApiVersion = (req: Request, res: Response, next: NextFunction) => {
+  if (req.headers["x-api-version"] !== "1") {
+    sendError(res, 400, "API version header required");
     return;
   }
-
-  const token = authHeader.substring(7);
-
-  const decoded = verifyAccessToken(token);
-  if (!decoded) {
-    sendError(res, 401, "Invalid or expired token");
-    return;
-  }
-
-  req.user = decoded;
   next();
-};
-
-// Require specific roles
-export const requireRole = (...allowedRoles: string[]) => {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (!req.user) {
-      sendError(res, 401, "Authentication required");
-      return;
-    }
-
-    if (!allowedRoles.includes(req.user.role)) {
-      sendError(res, 403, "Insufficient permissions");
-      return;
-    }
-
-    next();
-  };
-};
-</file>
-
-<file path="src/middlewares/ratelimit.middleware.ts">
-import rateLimit from "express-rate-limit";
-
-export const authRateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  message: { status: "error", message: "Too many requests" },
-});
-
-export const apiRateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  message: { status: "error", message: "Too many requests" },
-  keyGenerator: (req) => req.user?.userId ?? req.ip ?? "unknown",
-});
-</file>
-
-<file path="src/model/auth.model.ts">
-import {prisma} from "../lib/prisma"
-import { uuidv7 } from "uuidv7";
-
-interface GitHubUserPayload {
-  githubId: string;
-  username: string;
-  email: string;
-  avatarUrl: string;
-}
-
-/**
- * Creates a new user on first login, or updates their profile fields on every
- * subsequent login. The lookup key is `github_id`, which is stable and unique
- * across GitHub account renames.
- */
-export const upsertGitHubUser = (payload: GitHubUserPayload) => {
-  return prisma.user.upsert({
-    where: { github_id: payload.githubId },
-    update: {
-      username: payload.username,
-      email: payload.email,
-      avatar_url: payload.avatarUrl,
-      last_login_at: new Date(),
-    },
-    create: {
-      id: uuidv7(),
-      github_id: payload.githubId,
-      username: payload.username,
-      email: payload.email,
-      avatar_url: payload.avatarUrl,
-      role: "analyst",
-    },
-  });
-};
-
-/**
- * Fetches a single user row. Used during token refresh to verify the stored
- * refresh token matches the one the client sent (replay-attack prevention).
- */
-export const findUserById = (id: string) => {
-  return prisma.user.findUnique({ where: { id } });
-};
-
-/**
- * Writes a new refresh token to the user row.
- * Passing `null` effectively logs the user out by invalidating all sessions.
- */
-export const setRefreshToken = (userId: string, token: string | null) => {
-  return prisma.user.update({
-    where: { id: userId },
-    data: { refresh_token: token },
-  });
 };
 </file>
 
@@ -20562,265 +20459,15 @@ provider = "postgresql"
 }
 </file>
 
-<file path="src/config/app.config.ts">
-import cors from "cors";
-import express, { Application } from "express";
-import dotenv from "dotenv";
-import morgan from "morgan";
-import { notFoundHandler } from "../utils/notfound.utils";
-import { errorHandler } from "../utils/errorhandler.utils";
-import ProfileRouter from "../routes/profile.route"
-import AuthRouter from "../routes/auth.route"
-
-dotenv.config();
-
-export const createApp = (): Application => {
-  const app: Application = express();
-
-  app.disable('x-powered-by') // Hide Express header for security
-
-  app.use(express.json())
-
-
-  //Log every request including in production
-  app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
-
-
-  app.use(cors({ origin: "*" }));
-
-
-  //Routes
-
-  app.use("/auth", AuthRouter);
-  app.use("/api/profiles", ProfileRouter)
-
-
-
-
-  //Not Found Handler
-  app.use(notFoundHandler)
-
-  //Error Handler 
-  app.use(errorHandler)
-
-
-  return app;
-};
-</file>
-
-<file path="src/controllers/auth.controller.ts">
-import { Request, Response, NextFunction } from "express";
-import {
-  generateCodeVerifier,
-  generateCodeChallenge,
-  generateState,
-} from "../utils/pkce.utils.js";
-import {
-  generateAccessToken,
-  generateRefreshToken,
-  verifyRefreshToken,
-} from "../utils/jwt.utils.js";
-import {
-  buildAuthorizationUrl,
-  exchangeCodeForToken,
-  fetchGitHubUser,
-  fetchGitHubEmail,
-} from "../services/github.services";
-import { sendError } from "../utils/response.utils";
-import {
-  upsertGitHubUser,
-  findUserById,
-  setRefreshToken,
-} from "../model/auth.model";
-
-// Web flow only — CLI holds its own codeVerifier locally
-const pkceStore = new Map<string, { codeVerifier: string; expiresAt: number }>();
-
-const resolveUser = async (githubAccessToken: string, res: Response) => {
-  const githubUser = await fetchGitHubUser(githubAccessToken);
-  if (!githubUser) {
-    sendError(res, 502, "Failed to fetch GitHub user");
-    return null;
-  }
-
-  // GitHub hides email if user set it to private — fall back to /user/emails
-  const email = githubUser.email ?? (await fetchGitHubEmail(githubAccessToken));
-  if (!email) {
-    sendError(res, 400, "Email is required but not available");
-    return null;
-  }
-
-  const user = await upsertGitHubUser({
-    githubId: String(githubUser.id),
-    username: githubUser.login,
-    email,
-    avatarUrl: githubUser.avatar_url,
-  });
-
-  if (!user.is_active) {
-    sendError(res, 403, "Account is deactivated");
-    return null;
-  }
-
-  return user;
-};
-
-const issueTokens = async (userId: string, role: string, res: Response) => {
-  const accessToken = generateAccessToken(userId, role);
-  const refreshToken = generateRefreshToken(userId);
-  await setRefreshToken(userId, refreshToken);
-
-  res.status(200).json({
-    status: "success",
-    access_token: accessToken,
-    refresh_token: refreshToken,
-  });
-};
-
-export const initiateGitHubAuth = (req: Request, res: Response): void => {
-  const state = generateState();
-  const codeVerifier = generateCodeVerifier();
-  const codeChallenge = generateCodeChallenge(codeVerifier);
-
-  pkceStore.set(state, {
-    codeVerifier,
-    expiresAt: Date.now() + 10 * 60 * 1000,
-  });
-
-  res.redirect(buildAuthorizationUrl(state, codeChallenge));
-};
-
-export const handleGitHubCallback = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const { code, state, error } = req.query;
-
-    if (error || !code || !state) {
-      sendError(res, 400, "Authorization denied or missing parameters");
-      return;
-    }
-
-    const pkceData = pkceStore.get(state as string);
-    if (!pkceData || pkceData.expiresAt < Date.now()) {
-      pkceStore.delete(state as string);
-      sendError(res, 400, "Invalid or expired state");
-      return;
-    }
-
-    // Delete before exchanging — state is single-use
-    pkceStore.delete(state as string);
-
-    const tokenData = await exchangeCodeForToken(
-      code as string,
-      pkceData.codeVerifier
-    );
-    if (!tokenData) {
-      sendError(res, 502, "Token exchange failed");
-      return;
-    }
-
-    const user = await resolveUser(tokenData.access_token, res);
-    if (!user) return;
-
-    await issueTokens(user.id, user.role, res);
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const handleCLICallback = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const { code, code_verifier } = req.body;
-
-    if (!code || !code_verifier) {
-      sendError(res, 400, "code and code_verifier are required");
-      return;
-    }
-
-    const tokenData = await exchangeCodeForToken(code, code_verifier);
-    if (!tokenData) {
-      sendError(res, 502, "Token exchange failed");
-      return;
-    }
-
-    const user = await resolveUser(tokenData.access_token, res);
-    if (!user) return;
-
-    await issueTokens(user.id, user.role, res);
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const refreshAccessToken = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const { refresh_token } = req.body;
-
-    if (!refresh_token) {
-      sendError(res, 400, "refresh_token is required");
-      return;
-    }
-
-    const decoded = verifyRefreshToken(refresh_token);
-    if (!decoded) {
-      sendError(res, 401, "Invalid or expired refresh token");
-      return;
-    }
-
-    const user = await findUserById(decoded.userId);
-
-    // DB comparison catches replayed tokens — old tokens are overwritten on rotation
-    if (!user || user.refresh_token !== refresh_token) {
-      sendError(res, 401, "Invalid or expired refresh token");
-      return;
-    }
-
-    if (!user.is_active) {
-      sendError(res, 403, "Account is deactivated");
-      return;
-    }
-
-    await issueTokens(user.id, user.role, res);
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const logout = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    // req.user is set by authenticate middleware
-    await setRefreshToken(req.user!.userId, null);
-
-    res.status(200).json({
-      status: "success",
-      message: "Logged out successfully",
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-</file>
-
 <file path="src/controllers/profile.controller.ts">
 import { Request, Response, NextFunction } from "express";
 import { sendError } from "../utils/response.utils";
-import { findAllProfiles } from "../model/profile.model";
+import { findAllProfiles,findProfileById } from "../model/profile.model";
 import { parseNaturalQuery } from "../utils/nlp.utils";
+import { getGenderData } from "../services/genderize.service";
+import { getAgeData } from "../services/agify.service";
+import { getNationData } from "../services/nationalize.service";
+import { uuidv7 } from "uuidv7";
 
 
 const VALID_GENDERS = ["male", "female"];
@@ -20906,7 +20553,18 @@ export const getAllProfiles = async (
       page: result.page,
       limit: result.limit,
       total: result.total,
+      total_pages: Math.ceil(result.total / result.limit),
+      links: {
+        self: `/api/profiles?page=${result.page}&limit=${result.limit}`,
+        next: result.page < Math.ceil(result.total / result.limit)
+          ? `/api/profiles?page=${result.page + 1}&limit=${result.limit}`
+          : null,
+        prev: result.page > 1
+          ? `/api/profiles?page=${result.page - 1}&limit=${result.limit}`
+          : null,
+      },
       data: result.data,
+
     });
   } catch (error) {
     next(error);
@@ -20961,7 +20619,95 @@ export const searchProfiles = async (
       page: result.page,
       limit: result.limit,
       total: result.total,
+      total_pages: Math.ceil(result.total / result.limit),
+      links: {
+        self: `/api/profiles?page=${result.page}&limit=${result.limit}`,
+        next: result.page < Math.ceil(result.total / result.limit)
+          ? `/api/profiles?page=${result.page + 1}&limit=${result.limit}`
+          : null,
+        prev: result.page > 1
+          ? `/api/profiles?page=${result.page - 1}&limit=${result.limit}`
+          : null,
+      },
       data: result.data,
+
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+//get profile by id 
+export const getProfileById = async (
+  req: Request<{id: string}>,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { id } = req.params;
+
+    const profile = await findProfileById(id);
+
+    if (!profile) {
+      return sendError(res, 404, "Profile not found");
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: profile,
+    });
+  } catch (error) {
+    next(error);
+  }
+
+}
+
+
+
+export const createUserProfile = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { name } = req.body;
+
+    if (name === undefined) return sendError(res, 400, "Missing name");
+    if (Array.isArray(name) || typeof name !== "string") return sendError(res, 422, "Invalid type");
+    if (name.trim() === "") return sendError(res, 400, "Empty name");
+    if (/^\d+$/.test(name.trim())) return sendError(res, 422, "Invalid type");
+
+    // idempotency — same name returns existing profile instead of calling APIs again
+    const existingProfile = await findProfileByName(name);
+    if (existingProfile) {
+      return res.status(200).json({
+        status: "success",
+        message: "Profile already exists",
+        data: existingProfile,
+      });
+    }
+
+    // call all 3 external APIs in parallel — faster than sequential
+    const [genderData, ageData, nationData] = await Promise.all([
+      getGenderData(name),
+      getAgeData(name),
+      getNationData(name),
+    ]);
+
+    const newProfile = await createProfile({
+      id: uuidv7(),
+      name,
+      gender: genderData.gender,
+      gender_probability: genderData.gender_probability,
+      age: ageData.age,
+      age_group: ageData.age_group,
+      country_id: nationData.country_id,
+      country_probability: nationData.country_probability,
+    });
+
+    return res.status(201).json({
+      status: "success",
+      data: newProfile,
     });
   } catch (error) {
     next(error);
@@ -21002,148 +20748,128 @@ const prisma = new PrismaClient({ adapter });
 export { prisma };
 </file>
 
-<file path="src/routes/auth.route.ts">
-import { Router } from "express";
-import {
-  initiateGitHubAuth,
-  handleGitHubCallback,
-  handleCLICallback,
-  refreshAccessToken,
-  logout,
-} from "../controllers/auth.controller";
-import { authenticate } from "../middlewares/auth.middleware";
-import { authRateLimiter } from "../middlewares/ratelimit.middleware";
+<file path="src/middlewares/auth.middleware.ts">
+import { Request, Response, NextFunction } from "express";
+import { verifyAccessToken } from "../utils/jwt.utils.js";
+import { sendError } from "../utils/response.utils.js";
 
-const router = Router();
+// Extend Express Request to include user
+declare global {
+  namespace Express {
+    interface Request {
+      user?: { userId: string; role: string };
+    }
+  }
+}
 
-// Rate limit applies to every auth route
-router.use(authRateLimiter);
+// Require authentication
+export const authenticate = (req: Request, res: Response, next: NextFunction): void => {
+  const authHeader = req.headers.authorization;
 
-router.get("/github", initiateGitHubAuth);
-router.get("/github/callback", handleGitHubCallback);
-router.post("/cli/callback", handleCLICallback);
-router.post("/refresh", refreshAccessToken);
+  if (!authHeader?.startsWith("Bearer ")) {
+    sendError(res, 401, "Authentication required");
+    return;
+  }
 
-// logout requires a valid access token — you must be logged in to log out
-router.post("/logout", authenticate, logout);
+  const token = authHeader.substring(7);
 
-export default router;
+  const decoded = verifyAccessToken(token);
+  if (!decoded) {
+    sendError(res, 401, "Invalid or expired token");
+    return;
+  }
+
+  req.user = decoded;
+  next();
+};
+
+// Require specific roles
+export const requireRole = (...allowedRoles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      sendError(res, 401, "Authentication required");
+      return;
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      sendError(res, 403, "Insufficient permissions");
+      return;
+    }
+
+    next();
+  };
+};
 </file>
 
-<file path="src/services/github.services.ts">
-import axios from "axios";
+<file path="src/middlewares/ratelimit.middleware.ts">
+import rateLimit, {ipKeyGenerator} from "express-rate-limit";
 
-const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
-const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
-const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || "http://localhost:3000/auth/github/callback";
+export const authRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { status: "error", message: "Too many requests" },
+});
 
+export const apiRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { status: "error", message: "Too many requests" },
+});
+</file>
 
-export interface GitHubUser {
-  id: number;
-  login: string;
-  email: string | null;
-  avatar_url: string;
-  name: string | null;
-}
+<file path="src/model/auth.model.ts">
+import {prisma} from "../lib/prisma"
+import { uuidv7 } from "uuidv7";
 
-interface GitHubTokenResponse {
-  access_token: string;
-  token_type: string;
-  scope: string;
-  error?: string;
-}
-
-
-interface GitHubEmail {
+interface GitHubUserPayload {
+  githubId: string;
+  username: string;
   email: string;
-  primary: boolean;
-  verified: boolean;
+  avatarUrl: string;
 }
 
-export const buildAuthorizationUrl = (state: string, codeChallenge: string) => {
-    const params = new URLSearchParams({
-    client_id: GITHUB_CLIENT_ID,
-    redirect_uri: GITHUB_REDIRECT_URI,
-    scope: "read:user user:email",
-    state,
-    code_challenge: codeChallenge,
-    code_challenge_method: "S256",
+/**
+ * Creates a new user on first login, or updates their profile fields on every
+ * subsequent login. The lookup key is `github_id`, which is stable and unique
+ * across GitHub account renames.
+ */
+export const upsertGitHubUser = (payload: GitHubUserPayload) => {
+  return prisma.user.upsert({
+    where: { github_id: payload.githubId },
+    update: {
+      username: payload.username,
+      email: payload.email,
+      avatar_url: payload.avatarUrl,
+      last_login_at: new Date(),
+    },
+    create: {
+      id: uuidv7(),
+      github_id: payload.githubId,
+      username: payload.username,
+      email: payload.email,
+      avatar_url: payload.avatarUrl,
+      role: "analyst",
+    },
   });
-
-  return `https://github.com/login/oauth/authorize?${params.toString()}`;
-
-}
-
-
-// Step 2: Exchange authorization code for access token
-export const exchangeCodeForToken = async (
-  code: string,
-  codeVerifier: string
-): Promise<GitHubTokenResponse | null> => {
-  try {
-    const { data } = await axios.post<GitHubTokenResponse>(
-      "https://github.com/login/oauth/access_token",
-      {
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code,
-        redirect_uri: GITHUB_REDIRECT_URI,
-        code_verifier: codeVerifier,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-      }
-    );
-
-    if (data.error) return null;
-    return data;
-  } catch (error) {
-    console.error("Token exchange failed:", error);
-    return null;
-  }
 };
 
-
-export const fetchGitHubUser = async (accessToken: string): Promise<GitHubUser | null> => {
-  try {
-    const { data } = await axios.get<GitHubUser>("https://api.github.com/user", {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/vnd.github.v3+json",
-      },
-    });
-
-    return data;
-  } catch (error) {
-    console.error("Failed to fetch GitHub user:", error);
-    return null;
-  }
+/**
+ * Fetches a single user row. Used during token refresh to verify the stored
+ * refresh token matches the one the client sent (replay-attack prevention).
+ */
+export const findUserById = (id: string) => {
+  return prisma.user.findUnique({ where: { id } });
 };
 
-
-
-// Step 4: Fetch user's primary email
-export const fetchGitHubEmail = async (accessToken: string): Promise<string | null> => {
-  try {
-    const { data: emails } = await axios.get<GitHubEmail[]>(
-      "https://api.github.com/user/emails",
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/vnd.github.v3+json",
-        },
-      }
-    );
-
-    const primary = emails.find((e) => e.primary && e.verified);
-    return primary?.email || emails[0]?.email || null;
-  } catch (error) {
-    console.error("Failed to fetch GitHub email:", error);
-    return null;
-  }
+/**
+ * Writes a new refresh token to the user row.
+ * Passing `null` effectively logs the user out by invalidating all sessions.
+ */
+export const setRefreshToken = (userId: string, token: string | null) => {
+  return prisma.user.update({
+    where: { id: userId },
+    data: { refresh_token: token },
+  });
 };
 </file>
 
@@ -21780,6 +21506,260 @@ Contributions are welcome. To contribute:
 Please ensure your code compiles with `npm run build` before submitting a PR.
 </file>
 
+<file path="src/config/app.config.ts">
+import cors from "cors";
+import express, { Application } from "express";
+import dotenv from "dotenv";
+import morgan from "morgan";
+import { notFoundHandler } from "../utils/notfound.utils";
+import { errorHandler } from "../utils/errorhandler.utils";
+import ProfileRouter from "../routes/profile.route"
+import AuthRouter from "../routes/auth.route"
+
+dotenv.config();
+
+export const createApp = (): Application => {
+  const app: Application = express();
+
+  app.disable('x-powered-by') // Hide Express header for security
+
+  app.use(express.json())
+
+
+  //Log every request including in production
+  app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
+
+
+  app.use(cors({ origin: "*" }));
+
+
+  //Routes
+
+  app.use("/auth", AuthRouter);
+  app.use("/api/profiles", ProfileRouter)
+
+
+
+
+  //Not Found Handler
+  app.use(notFoundHandler)
+
+  //Error Handler 
+  app.use(errorHandler)
+
+
+  return app;
+};
+</file>
+
+<file path="src/controllers/auth.controller.ts">
+import { Request, Response, NextFunction } from "express";
+import {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  generateState,
+} from "../utils/pkce.utils.js";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+} from "../utils/jwt.utils.js";
+import {
+  buildAuthorizationUrl,
+  exchangeCodeForToken,
+  fetchGitHubUser,
+  fetchGitHubEmail,
+} from "../services/github.services";
+import { sendError } from "../utils/response.utils";
+import {
+  upsertGitHubUser,
+  findUserById,
+  setRefreshToken,
+} from "../model/auth.model";
+
+// Web flow only — CLI holds its own codeVerifier locally
+const pkceStore = new Map<string, { codeVerifier: string; expiresAt: number }>();
+
+const resolveUser = async (githubAccessToken: string, res: Response) => {
+  const githubUser = await fetchGitHubUser(githubAccessToken);
+  if (!githubUser) {
+    sendError(res, 502, "Failed to fetch GitHub user");
+    return null;
+  }
+
+  // GitHub hides email if user set it to private — fall back to /user/emails
+  const email = githubUser.email ?? (await fetchGitHubEmail(githubAccessToken));
+  if (!email) {
+    sendError(res, 400, "Email is required but not available");
+    return null;
+  }
+
+  const user = await upsertGitHubUser({
+    githubId: String(githubUser.id),
+    username: githubUser.login,
+    email,
+    avatarUrl: githubUser.avatar_url,
+  });
+
+  if (!user.is_active) {
+    sendError(res, 403, "Account is deactivated");
+    return null;
+  }
+
+  return user;
+};
+
+const issueTokens = async (userId: string, role: string, res: Response) => {
+  const accessToken = generateAccessToken(userId, role);
+  const refreshToken = generateRefreshToken(userId);
+  await setRefreshToken(userId, refreshToken);
+
+  res.status(200).json({
+    status: "success",
+    access_token: accessToken,
+    refresh_token: refreshToken,
+  });
+};
+
+export const initiateGitHubAuth = (req: Request, res: Response): void => {
+  const state = generateState();
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+
+  pkceStore.set(state, {
+    codeVerifier,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+
+  res.redirect(buildAuthorizationUrl(state, codeChallenge));
+};
+
+export const handleGitHubCallback = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { code, state, error } = req.query;
+
+    if (error || !code || !state) {
+      sendError(res, 400, "Authorization denied or missing parameters");
+      return;
+    }
+
+    const pkceData = pkceStore.get(state as string);
+    if (!pkceData || pkceData.expiresAt < Date.now()) {
+      pkceStore.delete(state as string);
+      sendError(res, 400, "Invalid or expired state");
+      return;
+    }
+
+    // Delete before exchanging — state is single-use
+    pkceStore.delete(state as string);
+
+    const tokenData = await exchangeCodeForToken(
+      code as string,
+      pkceData.codeVerifier
+    );
+    if (!tokenData) {
+      sendError(res, 502, "Token exchange failed");
+      return;
+    }
+
+    const user = await resolveUser(tokenData.access_token, res);
+    if (!user) return;
+
+    await issueTokens(user.id, user.role, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const handleCLICallback = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { code, code_verifier } = req.body;
+
+    if (!code || !code_verifier) {
+      sendError(res, 400, "code and code_verifier are required");
+      return;
+    }
+
+    const tokenData = await exchangeCodeForToken(code, code_verifier);
+    if (!tokenData) {
+      sendError(res, 502, "Token exchange failed");
+      return;
+    }
+
+    const user = await resolveUser(tokenData.access_token, res);
+    if (!user) return;
+
+    await issueTokens(user.id, user.role, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const refreshAccessToken = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { refresh_token } = req.body;
+
+    if (!refresh_token) {
+      sendError(res, 400, "refresh_token is required");
+      return;
+    }
+
+    const decoded = verifyRefreshToken(refresh_token);
+    if (!decoded) {
+      sendError(res, 401, "Invalid or expired refresh token");
+      return;
+    }
+
+    const user = await findUserById(decoded.userId);
+
+    // DB comparison catches replayed tokens — old tokens are overwritten on rotation
+    if (!user || user.refresh_token !== refresh_token) {
+      sendError(res, 401, "Invalid or expired refresh token");
+      return;
+    }
+
+    if (!user.is_active) {
+      sendError(res, 403, "Account is deactivated");
+      return;
+    }
+
+    await issueTokens(user.id, user.role, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const logout = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    // req.user is set by authenticate middleware
+    await setRefreshToken(req.user!.userId, null);
+
+    res.status(200).json({
+      status: "success",
+      message: "Logged out successfully",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+</file>
+
 <file path="src/model/profile.model.ts">
 import { prisma } from "../lib/prisma.js";
 
@@ -21854,52 +21834,271 @@ export const findAllProfiles = async (filters: ProfileFilters) => {
 
   return { data, total, page, limit };
 };
+
+
+//Get profile by ID
+export const findProfileById = (id: string) => {
+  return prisma.profile.findUnique({ where: { id } });
+}
+
+
+
+export const createProfile = async (data: {
+  id: string;
+  name: string;
+  gender: string;
+  gender_probability: number;
+  age: number;
+  age_group: string;
+  country_id: string;
+  country_name?: string | null;
+  country_probability: number;
+}) => {
+  return await prisma.profile.create({ data });
+};
 </file>
 
-<file path="package.json">
-{
-  "name": "stage1",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon --exec tsx src/index.ts",
-    "build": "tsc",
-    "start": "node dist/src/index.js",
-    "postinstall": "prisma generate"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "@prisma/adapter-pg": "^7.7.0",
-    "@prisma/client": "^7.7.0",
-    "axios": "^1.15.2",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.4.1",
-    "jsonwebtoken": "^9.0.3",
-    "morgan": "^1.10.1",
-    "pg": "^8.20.0",
-    "uuidv7": "^1.2.1"
-  },
-  "devDependencies": {
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/morgan": "^1.9.10",
-    "@types/node": "^25.6.0",
-    "@types/pg": "^8.20.0",
-    "@types/uuid": "^10.0.0",
-    "nodemon": "^3.1.14",
-    "prisma": "^7.7.0",
-    "tsup": "^8.5.1",
-    "tsx": "^4.21.0",
-    "typescript": "^6.0.2"
-  }
+<file path="src/routes/auth.route.ts">
+import { Router } from "express";
+import {
+  initiateGitHubAuth,
+  handleGitHubCallback,
+  handleCLICallback,
+  refreshAccessToken,
+  logout,
+} from "../controllers/auth.controller";
+import { authenticate } from "../middlewares/auth.middleware";
+import { authRateLimiter } from "../middlewares/ratelimit.middleware";
+
+const router = Router();
+
+// Rate limit applies to every auth route
+router.use(authRateLimiter);
+
+router.get("/github", initiateGitHubAuth);
+router.get("/github/callback", handleGitHubCallback);
+router.post("/cli/callback", handleCLICallback);
+router.post("/refresh", refreshAccessToken);
+
+// logout requires a valid access token — you must be logged in to log out
+router.post("/logout", authenticate, logout);
+
+export default router;
+</file>
+
+<file path="src/services/agify.service.ts">
+import axios from "axios";
+import { AppError } from "../utils/apperror.utils.js";
+
+interface AgifyResponse {
+  count: number;
+  name: string;
+  age: number;
 }
+
+export const getAgeData = async (name: string) => {
+  const { data } = await axios.get<AgifyResponse>(
+    `https://api.agify.io?name=${name}`,
+  );
+
+  //age group based classification
+  if (!data.age) {
+    throw new AppError("Agify returned an invalid response", 502);
+  }
+  const classifyAgeGroup = (age: number): string => {
+    if (age <= 12) return "child";
+    if (age <= 19) return "teenager";
+    if (age <= 59) return "adult";
+    return "senior";
+  };
+
+  return {
+    age: data.age,
+    age_group: classifyAgeGroup(data.age),
+  };
+};
+</file>
+
+<file path="src/services/genderize.service.ts">
+import axios from "axios"
+import { AppError } from "../utils/apperror.utils.js"
+
+interface GenderizeResponse {
+    count: number,
+    name: string,
+    gender: "male" | "female" | null,
+    probability: number
+}
+
+export const getGenderData = async(name: string) => {
+    const {data} = await axios.get<GenderizeResponse>(
+        `https://api.genderize.io?name=${name}`
+    )
+
+    // edge case check
+  if (!data.gender || data.count === 0) {
+   throw new AppError("Genderize returned an invalid response", 502);
+  }
+
+  return {
+    gender: data.gender,
+    gender_probability: data.probability,
+    sample_size: data.count,
+  };
+}
+</file>
+
+<file path="src/services/github.services.ts">
+import axios from "axios";
+
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
+const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || "http://localhost:3000/auth/github/callback";
+
+
+export interface GitHubUser {
+  id: number;
+  login: string;
+  email: string | null;
+  avatar_url: string;
+  name: string | null;
+}
+
+interface GitHubTokenResponse {
+  access_token: string;
+  token_type: string;
+  scope: string;
+  error?: string;
+}
+
+
+interface GitHubEmail {
+  email: string;
+  primary: boolean;
+  verified: boolean;
+}
+
+export const buildAuthorizationUrl = (state: string, codeChallenge: string) => {
+    const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: GITHUB_REDIRECT_URI,
+    scope: "read:user user:email",
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+  });
+
+  return `https://github.com/login/oauth/authorize?${params.toString()}`;
+
+}
+
+
+// Step 2: Exchange authorization code for access token
+export const exchangeCodeForToken = async (
+  code: string,
+  codeVerifier: string
+): Promise<GitHubTokenResponse | null> => {
+  try {
+    const { data } = await axios.post<GitHubTokenResponse>(
+      "https://github.com/login/oauth/access_token",
+      {
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: GITHUB_REDIRECT_URI,
+        code_verifier: codeVerifier,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (data.error) return null;
+    return data;
+  } catch (error) {
+    console.error("Token exchange failed:", error);
+    return null;
+  }
+};
+
+
+export const fetchGitHubUser = async (accessToken: string): Promise<GitHubUser | null> => {
+  try {
+    const { data } = await axios.get<GitHubUser>("https://api.github.com/user", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    });
+
+    return data;
+  } catch (error) {
+    console.error("Failed to fetch GitHub user:", error);
+    return null;
+  }
+};
+
+
+
+// Step 4: Fetch user's primary email
+export const fetchGitHubEmail = async (accessToken: string): Promise<string | null> => {
+  try {
+    const { data: emails } = await axios.get<GitHubEmail[]>(
+      "https://api.github.com/user/emails",
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      }
+    );
+
+    const primary = emails.find((e) => e.primary && e.verified);
+    return primary?.email || emails[0]?.email || null;
+  } catch (error) {
+    console.error("Failed to fetch GitHub email:", error);
+    return null;
+  }
+};
+</file>
+
+<file path="src/services/nationalize.service.ts">
+import axios from "axios";
+import { AppError } from "../utils/apperror.utils.js";
+
+interface NationalizeResponse {
+  count: number;
+  name: string;
+  country: {
+    country_id: string;
+    probability: number;
+  }[];
+}
+
+export const getNationData = async (name: string) => {
+  const { data } = await axios.get<NationalizeResponse>(
+    `https://api.nationalize.io?name=${name}`,
+  );
+
+  if(!data || !data.country || data.country.length === 0) {
+     throw new AppError("Nationalize returned an invalid response", 502);
+  }
+
+  //pick the country with the highest probability
+  const topCountry = data.country.reduce((prev, curr) =>
+    curr.probability > prev.probability ? curr : prev,
+  );
+
+
+  return {
+    country_id: topCountry.country_id,
+     country_probability: topCountry.probability,
+
+  };
+};
 </file>
 
 <file path="prisma/schema.prisma">
@@ -21925,7 +22124,7 @@ model Profile {
   age                 Int
   age_group           String
   country_id          String
-  country_name        String
+  country_name        String?
   country_probability Float
   created_at          DateTime @default(now())
 }
@@ -22004,11 +22203,64 @@ main()
   });
 </file>
 
+<file path="package.json">
+{
+  "name": "stage1",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon --exec tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "postinstall": "prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
+    "axios": "^1.15.2",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.4.1",
+    "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.10.1",
+    "pg": "^8.20.0",
+    "uuidv7": "^1.2.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/morgan": "^1.9.10",
+    "@types/node": "^25.6.0",
+    "@types/pg": "^8.20.0",
+    "@types/uuid": "^10.0.0",
+    "nodemon": "^3.1.14",
+    "prisma": "^7.7.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
+</file>
+
 <file path="src/routes/profile.route.ts">
 import { Router } from "express";
 import { getAllProfiles, searchProfiles } from "../controllers/profile.controller";
+import { authenticate } from "@/middlewares/auth.middleware";
+import { apiRateLimiter } from "@/middlewares/ratelimit.middleware";
+import { requireApiVersion } from "@/middlewares/apiversion.middleware";
 
 const router = Router();
+
+router.use(authenticate);
+router.use(apiRateLimiter);
+router.use(requireApiVersion);
 
 router.get("/", getAllProfiles);
 router.get("/search", searchProfiles);

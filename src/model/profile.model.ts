@@ -71,3 +71,32 @@ export const findAllProfiles = async (filters: ProfileFilters) => {
 
   return { data, total, page, limit };
 };
+
+
+//Get profile by ID
+export const findProfileById = (id: string) => {
+  return prisma.profile.findUnique({ where: { id } });
+}
+
+
+
+export const createProfile = async (data: {
+  id: string;
+  name: string;
+  gender: string;
+  gender_probability: number;
+  age: number;
+  age_group: string;
+  country_id: string;
+  country_name?: string | null;
+  country_probability: number;
+}) => {
+  return await prisma.profile.create({ data });
+};
+
+
+
+
+export const findProfileByName = (name: string) => {
+  return prisma.profile.findUnique({ where: { name } });
+};

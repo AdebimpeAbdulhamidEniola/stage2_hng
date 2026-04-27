@@ -1,7 +1,11 @@
 import { Request, Response, NextFunction } from "express";
 import { sendError } from "../utils/response.utils";
-import { findAllProfiles } from "../model/profile.model";
+import { findAllProfiles,findProfileById, createProfile, findProfileByName } from "../model/profile.model";
 import { parseNaturalQuery } from "../utils/nlp.utils";
+import { getGenderData } from "../services/genderize.service";
+import { getAgeData } from "../services/agify.service";
+import { getNationData } from "../services/nationalize.service";
+import { uuidv7 } from "uuidv7";
 
 
 const VALID_GENDERS = ["male", "female"];
@@ -87,7 +91,18 @@ export const getAllProfiles = async (
       page: result.page,
       limit: result.limit,
       total: result.total,
+      total_pages: Math.ceil(result.total / result.limit),
+      links: {
+        self: `/api/profiles?page=${result.page}&limit=${result.limit}`,
+        next: result.page < Math.ceil(result.total / result.limit)
+          ? `/api/profiles?page=${result.page + 1}&limit=${result.limit}`
+          : null,
+        prev: result.page > 1
+          ? `/api/profiles?page=${result.page - 1}&limit=${result.limit}`
+          : null,
+      },
       data: result.data,
+
     });
   } catch (error) {
     next(error);
@@ -142,7 +157,95 @@ export const searchProfiles = async (
       page: result.page,
       limit: result.limit,
       total: result.total,
+      total_pages: Math.ceil(result.total / result.limit),
+      links: {
+        self: `/api/profiles?page=${result.page}&limit=${result.limit}`,
+        next: result.page < Math.ceil(result.total / result.limit)
+          ? `/api/profiles?page=${result.page + 1}&limit=${result.limit}`
+          : null,
+        prev: result.page > 1
+          ? `/api/profiles?page=${result.page - 1}&limit=${result.limit}`
+          : null,
+      },
       data: result.data,
+
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+//get profile by id 
+export const getProfileById = async (
+  req: Request<{id: string}>,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { id } = req.params;
+
+    const profile = await findProfileById(id);
+
+    if (!profile) {
+      return sendError(res, 404, "Profile not found");
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: profile,
+    });
+  } catch (error) {
+    next(error);
+  }
+
+}
+
+
+
+export const createUserProfile = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { name } = req.body;
+
+    if (name === undefined) return sendError(res, 400, "Missing name");
+    if (Array.isArray(name) || typeof name !== "string") return sendError(res, 422, "Invalid type");
+    if (name.trim() === "") return sendError(res, 400, "Empty name");
+    if (/^\d+$/.test(name.trim())) return sendError(res, 422, "Invalid type");
+
+    // idempotency — same name returns existing profile instead of calling APIs again
+    const existingProfile = await findProfileByName(name);
+    if (existingProfile) {
+      return res.status(200).json({
+        status: "success",
+        message: "Profile already exists",
+        data: existingProfile,
+      });
+    }
+
+    // call all 3 external APIs in parallel — faster than sequential
+    const [genderData, ageData, nationData] = await Promise.all([
+      getGenderData(name),
+      getAgeData(name),
+      getNationData(name),
+    ]);
+
+    const newProfile = await createProfile({
+      id: uuidv7(),
+      name,
+      gender: genderData.gender,
+      gender_probability: genderData.gender_probability,
+      age: ageData.age,
+      age_group: ageData.age_group,
+      country_id: nationData.country_id,
+      country_probability: nationData.country_probability,
+    });
+
+    return res.status(201).json({
+      status: "success",
+      data: newProfile,
     });
   } catch (error) {
     next(error);
