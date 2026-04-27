@@ -57,9 +57,13 @@ src/controllers/auth.controller.ts
 src/controllers/profile.controller.ts
 src/index.ts
 src/lib/prisma.ts
+src/middlewares/auth.middleware.ts
+src/middlewares/ratelimit.middleware.ts
+src/model/auth.model.ts
 src/model/profile.model.ts
 src/routes/auth.route.ts
 src/routes/profile.route.ts
+src/services/github.services.ts
 src/utils/apperror.utils.ts
 src/utils/errorhandler.utils.ts
 src/utils/jwt.utils.ts
@@ -73,219 +77,129 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
-<file path="prisma/migrations/20260426132235_add_column/migration.sql">
--- AlterTable
-ALTER TABLE "User" ADD COLUMN     "refresh_token" TEXT;
-</file>
-
-<file path="src/controllers/auth.controller.ts">
-
-</file>
-
-<file path="src/controllers/profile.controller.ts">
+<file path="src/middlewares/auth.middleware.ts">
 import { Request, Response, NextFunction } from "express";
-import { sendError } from "../utils/response.utils";
-import { findAllProfiles } from "../model/profile.model";
-import { parseNaturalQuery } from "../utils/nlp.utils";
+import { verifyAccessToken } from "../utils/jwt.utils.js";
+import { sendError } from "../utils/response.utils.js";
 
-
-const VALID_GENDERS = ["male", "female"];
-const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
-const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
-const VALID_ORDER = ["asc", "desc"];
-
-export const getAllProfiles = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const {
-      gender,
-      age_group,
-      country_id,
-      min_age,
-      max_age,
-      min_gender_probability,
-      min_country_probability,
-      sort_by,
-      order,
-      page,
-      limit,
-    } = req.query;
-
-    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
-      return sendError(res, 422, "Invalid query parameters");
+// Extend Express Request to include user
+declare global {
+  namespace Express {
+    interface Request {
+      user?: { userId: string; role: string };
     }
-    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    const parsedMinAge = min_age ? Number(min_age) : undefined;
-    const parsedMaxAge = max_age ? Number(max_age) : undefined;
-    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
-    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
-    const parsedPage = page ? Number(page) : undefined;
-    const parsedLimit = limit ? Number(limit) : undefined;
-
-    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    const result = await findAllProfiles({
-      gender: typeof gender === "string" ? gender : undefined,
-      age_group: typeof age_group === "string" ? age_group : undefined,
-      country_id: typeof country_id === "string" ? country_id : undefined,
-      min_age: parsedMinAge,
-      max_age: parsedMaxAge,
-      min_gender_probability: parsedMinGenderProb,
-      min_country_probability: parsedMinCountryProb,
-      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
-      order: order as "asc" | "desc" | undefined,
-      page: parsedPage,
-      limit: parsedLimit,
-    });
-
-    return res.status(200).json({
-      status: "success",
-      page: result.page,
-      limit: result.limit,
-      total: result.total,
-      data: result.data,
-    });
-  } catch (error) {
-    next(error);
   }
-};
-
-
-export const searchProfiles = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const { q, page, limit } = req.query;
-
-    // q is required
-    if (!q || (q as string).trim() === "") {
-      return sendError(res, 400, "Missing or empty query");
-    }
-
-    // parse the natural language query
-    const filters = parseNaturalQuery(q as string);
-
-    // couldn't interpret the query
-    if (!filters) {
-      return res.status(400).json({
-        status: "error",
-        message: "Unable to interpret query",
-      });
-    }
-
-    // parse pagination
-    const parsedPage = page ? Number(page) : undefined;
-    const parsedLimit = limit ? Number(limit) : undefined;
-
-    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
-      return sendError(res, 422, "Invalid query parameters");
-    }
-
-    // reuse same findAllProfiles model function
-    const result = await findAllProfiles({
-      ...filters,
-      page: parsedPage,
-      limit: parsedLimit,
-    });
-
-    return res.status(200).json({
-      status: "success",
-      page: result.page,
-      limit: result.limit,
-      total: result.total,
-      data: result.data,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-</file>
-
-<file path="src/routes/auth.route.ts">
-
-</file>
-
-<file path="src/utils/jwt.utils.ts">
-import * as jwt from 'jsonwebtoken'
-
-const JWT_SECRET = process.env.JWT_SECRET || "default_secret";
-const JWT_REFRESH_SECRET =process.env.JWT_REFRESH_SECRET || "FALLBACK SECRET"
-
-export const generateAccessToken = (userId: string, role:string ): string => {
-    const options: jwt.SignOptions = { 
-    expiresIn: "3m"
-  };
-  
-  return jwt.sign({ userId, role }, JWT_SECRET, options);
 }
 
+// Require authentication
+export const authenticate = (req: Request, res: Response, next: NextFunction): void => {
+  const authHeader = req.headers.authorization;
 
-export const generateRefreshToken = (userId: string): string => {
-    const options: jwt.SignOptions = { 
-    expiresIn: "5m"
+  if (!authHeader?.startsWith("Bearer ")) {
+    sendError(res, 401, "Authentication required");
+    return;
+  }
+
+  const token = authHeader.substring(7);
+
+  const decoded = verifyAccessToken(token);
+  if (!decoded) {
+    sendError(res, 401, "Invalid or expired token");
+    return;
+  }
+
+  req.user = decoded;
+  next();
+};
+
+// Require specific roles
+export const requireRole = (...allowedRoles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      sendError(res, 401, "Authentication required");
+      return;
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      sendError(res, 403, "Insufficient permissions");
+      return;
+    }
+
+    next();
   };
-  
-  return jwt.sign({ userId }, JWT_REFRESH_SECRET, options);
-}
+};
 </file>
 
-<file path="src/utils/pkce.utils.ts">
-import crypto from "crypto";
+<file path="src/middlewares/ratelimit.middleware.ts">
+import rateLimit from "express-rate-limit";
 
-export const generateCodeVerifier = (): string => {
-  const buffer = crypto.randomBytes(32);
-  return base64URLEncode(buffer);
+export const authRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { status: "error", message: "Too many requests" },
+});
+
+export const apiRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { status: "error", message: "Too many requests" },
+  keyGenerator: (req) => req.user?.userId ?? req.ip ?? "unknown",
+});
+</file>
+
+<file path="src/model/auth.model.ts">
+import {prisma} from "../lib/prisma"
+import { uuidv7 } from "uuidv7";
+
+interface GitHubUserPayload {
+  githubId: string;
+  username: string;
+  email: string;
+  avatarUrl: string;
+}
+
+/**
+ * Creates a new user on first login, or updates their profile fields on every
+ * subsequent login. The lookup key is `github_id`, which is stable and unique
+ * across GitHub account renames.
+ */
+export const upsertGitHubUser = (payload: GitHubUserPayload) => {
+  return prisma.user.upsert({
+    where: { github_id: payload.githubId },
+    update: {
+      username: payload.username,
+      email: payload.email,
+      avatar_url: payload.avatarUrl,
+      last_login_at: new Date(),
+    },
+    create: {
+      id: uuidv7(),
+      github_id: payload.githubId,
+      username: payload.username,
+      email: payload.email,
+      avatar_url: payload.avatarUrl,
+      role: "analyst",
+    },
+  });
 };
 
-export const generateCodeChallenge = (verifier: string): string => {
-  const hash = crypto.createHash("sha256").update(verifier).digest();
-  return base64URLEncode(hash);
+/**
+ * Fetches a single user row. Used during token refresh to verify the stored
+ * refresh token matches the one the client sent (replay-attack prevention).
+ */
+export const findUserById = (id: string) => {
+  return prisma.user.findUnique({ where: { id } });
 };
 
-export const generateState = (): string => {
-  return crypto.randomBytes(16).toString("hex");
-};
-
-const base64URLEncode = (buffer: Buffer): string => {
-  return buffer
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=/g, "");
+/**
+ * Writes a new refresh token to the user row.
+ * Passing `null` effectively logs the user out by invalidating all sessions.
+ */
+export const setRefreshToken = (userId: string, token: string | null) => {
+  return prisma.user.update({
+    where: { id: userId },
+    data: { refresh_token: token },
+  });
 };
 </file>
 
@@ -368,6 +282,11 @@ CREATE TABLE "User" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_github_id_key" ON "User"("github_id");
+</file>
+
+<file path="prisma/migrations/20260426132235_add_column/migration.sql">
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN     "refresh_token" TEXT;
 </file>
 
 <file path="prisma/migrations/migration_lock.toml">
@@ -20651,6 +20570,7 @@ import morgan from "morgan";
 import { notFoundHandler } from "../utils/notfound.utils";
 import { errorHandler } from "../utils/errorhandler.utils";
 import ProfileRouter from "../routes/profile.route"
+import AuthRouter from "../routes/auth.route"
 
 dotenv.config();
 
@@ -20661,10 +20581,9 @@ export const createApp = (): Application => {
 
   app.use(express.json())
 
-  // Use Morgan logger in development only
-  if (process.env.NODE_ENV !== 'production') {
-    app.use(morgan('dev'));
-  }
+
+  //Log every request including in production
+  app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 
 
   app.use(cors({ origin: "*" }));
@@ -20672,8 +20591,9 @@ export const createApp = (): Application => {
 
   //Routes
 
+  app.use("/auth", AuthRouter);
   app.use("/api/profiles", ProfileRouter)
- 
+
 
 
 
@@ -20685,6 +20605,367 @@ export const createApp = (): Application => {
 
 
   return app;
+};
+</file>
+
+<file path="src/controllers/auth.controller.ts">
+import { Request, Response, NextFunction } from "express";
+import {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  generateState,
+} from "../utils/pkce.utils.js";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+} from "../utils/jwt.utils.js";
+import {
+  buildAuthorizationUrl,
+  exchangeCodeForToken,
+  fetchGitHubUser,
+  fetchGitHubEmail,
+} from "../services/github.services";
+import { sendError } from "../utils/response.utils";
+import {
+  upsertGitHubUser,
+  findUserById,
+  setRefreshToken,
+} from "../model/auth.model";
+
+// Web flow only — CLI holds its own codeVerifier locally
+const pkceStore = new Map<string, { codeVerifier: string; expiresAt: number }>();
+
+const resolveUser = async (githubAccessToken: string, res: Response) => {
+  const githubUser = await fetchGitHubUser(githubAccessToken);
+  if (!githubUser) {
+    sendError(res, 502, "Failed to fetch GitHub user");
+    return null;
+  }
+
+  // GitHub hides email if user set it to private — fall back to /user/emails
+  const email = githubUser.email ?? (await fetchGitHubEmail(githubAccessToken));
+  if (!email) {
+    sendError(res, 400, "Email is required but not available");
+    return null;
+  }
+
+  const user = await upsertGitHubUser({
+    githubId: String(githubUser.id),
+    username: githubUser.login,
+    email,
+    avatarUrl: githubUser.avatar_url,
+  });
+
+  if (!user.is_active) {
+    sendError(res, 403, "Account is deactivated");
+    return null;
+  }
+
+  return user;
+};
+
+const issueTokens = async (userId: string, role: string, res: Response) => {
+  const accessToken = generateAccessToken(userId, role);
+  const refreshToken = generateRefreshToken(userId);
+  await setRefreshToken(userId, refreshToken);
+
+  res.status(200).json({
+    status: "success",
+    access_token: accessToken,
+    refresh_token: refreshToken,
+  });
+};
+
+export const initiateGitHubAuth = (req: Request, res: Response): void => {
+  const state = generateState();
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+
+  pkceStore.set(state, {
+    codeVerifier,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+
+  res.redirect(buildAuthorizationUrl(state, codeChallenge));
+};
+
+export const handleGitHubCallback = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { code, state, error } = req.query;
+
+    if (error || !code || !state) {
+      sendError(res, 400, "Authorization denied or missing parameters");
+      return;
+    }
+
+    const pkceData = pkceStore.get(state as string);
+    if (!pkceData || pkceData.expiresAt < Date.now()) {
+      pkceStore.delete(state as string);
+      sendError(res, 400, "Invalid or expired state");
+      return;
+    }
+
+    // Delete before exchanging — state is single-use
+    pkceStore.delete(state as string);
+
+    const tokenData = await exchangeCodeForToken(
+      code as string,
+      pkceData.codeVerifier
+    );
+    if (!tokenData) {
+      sendError(res, 502, "Token exchange failed");
+      return;
+    }
+
+    const user = await resolveUser(tokenData.access_token, res);
+    if (!user) return;
+
+    await issueTokens(user.id, user.role, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const handleCLICallback = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { code, code_verifier } = req.body;
+
+    if (!code || !code_verifier) {
+      sendError(res, 400, "code and code_verifier are required");
+      return;
+    }
+
+    const tokenData = await exchangeCodeForToken(code, code_verifier);
+    if (!tokenData) {
+      sendError(res, 502, "Token exchange failed");
+      return;
+    }
+
+    const user = await resolveUser(tokenData.access_token, res);
+    if (!user) return;
+
+    await issueTokens(user.id, user.role, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const refreshAccessToken = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { refresh_token } = req.body;
+
+    if (!refresh_token) {
+      sendError(res, 400, "refresh_token is required");
+      return;
+    }
+
+    const decoded = verifyRefreshToken(refresh_token);
+    if (!decoded) {
+      sendError(res, 401, "Invalid or expired refresh token");
+      return;
+    }
+
+    const user = await findUserById(decoded.userId);
+
+    // DB comparison catches replayed tokens — old tokens are overwritten on rotation
+    if (!user || user.refresh_token !== refresh_token) {
+      sendError(res, 401, "Invalid or expired refresh token");
+      return;
+    }
+
+    if (!user.is_active) {
+      sendError(res, 403, "Account is deactivated");
+      return;
+    }
+
+    await issueTokens(user.id, user.role, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const logout = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    // req.user is set by authenticate middleware
+    await setRefreshToken(req.user!.userId, null);
+
+    res.status(200).json({
+      status: "success",
+      message: "Logged out successfully",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+</file>
+
+<file path="src/controllers/profile.controller.ts">
+import { Request, Response, NextFunction } from "express";
+import { sendError } from "../utils/response.utils";
+import { findAllProfiles } from "../model/profile.model";
+import { parseNaturalQuery } from "../utils/nlp.utils";
+
+
+const VALID_GENDERS = ["male", "female"];
+const VALID_AGE_GROUPS = ["child", "teenager", "adult", "senior"];
+const VALID_SORT_BY = ["age", "created_at", "gender_probability"];
+const VALID_ORDER = ["asc", "desc"];
+
+export const getAllProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const {
+      gender,
+      age_group,
+      country_id,
+      min_age,
+      max_age,
+      min_gender_probability,
+      min_country_probability,
+      sort_by,
+      order,
+      page,
+      limit,
+    } = req.query;
+
+    if (gender !== undefined && !VALID_GENDERS.includes(gender as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (age_group !== undefined && !VALID_AGE_GROUPS.includes(age_group as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (sort_by !== undefined && !VALID_SORT_BY.includes(sort_by as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (order !== undefined && !VALID_ORDER.includes(order as string)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const parsedMinAge = min_age ? Number(min_age) : undefined;
+    const parsedMaxAge = max_age ? Number(max_age) : undefined;
+    const parsedMinGenderProb = min_gender_probability ? Number(min_gender_probability) : undefined;
+    const parsedMinCountryProb = min_country_probability ? Number(min_country_probability) : undefined;
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
+
+    if (parsedMinAge !== undefined && isNaN(parsedMinAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMaxAge !== undefined && isNaN(parsedMaxAge)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinGenderProb !== undefined && isNaN(parsedMinGenderProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedMinCountryProb !== undefined && isNaN(parsedMinCountryProb)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    const result = await findAllProfiles({
+      gender: typeof gender === "string" ? gender : undefined,
+      age_group: typeof age_group === "string" ? age_group : undefined,
+      country_id: typeof country_id === "string" ? country_id : undefined,
+      min_age: parsedMinAge,
+      max_age: parsedMaxAge,
+      min_gender_probability: parsedMinGenderProb,
+      min_country_probability: parsedMinCountryProb,
+      sort_by: sort_by as "age" | "created_at" | "gender_probability" | undefined,
+      order: order as "asc" | "desc" | undefined,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+
+    return res.status(200).json({
+      status: "success",
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+export const searchProfiles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { q, page, limit } = req.query;
+
+    // q is required
+    if (!q || (q as string).trim() === "") {
+      return sendError(res, 400, "Missing or empty query");
+    }
+
+    // parse the natural language query
+    const filters = parseNaturalQuery(q as string);
+
+    // couldn't interpret the query
+    if (!filters) {
+      return res.status(400).json({
+        status: "error",
+        message: "Unable to interpret query",
+      });
+    }
+
+    // parse pagination
+    const parsedPage = page ? Number(page) : undefined;
+    const parsedLimit = limit ? Number(limit) : undefined;
+
+    if (parsedPage !== undefined && (isNaN(parsedPage) || parsedPage < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+    if (parsedLimit !== undefined && (isNaN(parsedLimit) || parsedLimit < 1)) {
+      return sendError(res, 422, "Invalid query parameters");
+    }
+
+    // reuse same findAllProfiles model function
+    const result = await findAllProfiles({
+      ...filters,
+      page: parsedPage,
+      limit: parsedLimit,
+    });
+
+    return res.status(200).json({
+      status: "success",
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      data: result.data,
+    });
+  } catch (error) {
+    next(error);
+  }
 };
 </file>
 
@@ -20721,6 +21002,151 @@ const prisma = new PrismaClient({ adapter });
 export { prisma };
 </file>
 
+<file path="src/routes/auth.route.ts">
+import { Router } from "express";
+import {
+  initiateGitHubAuth,
+  handleGitHubCallback,
+  handleCLICallback,
+  refreshAccessToken,
+  logout,
+} from "../controllers/auth.controller";
+import { authenticate } from "../middlewares/auth.middleware";
+import { authRateLimiter } from "../middlewares/ratelimit.middleware";
+
+const router = Router();
+
+// Rate limit applies to every auth route
+router.use(authRateLimiter);
+
+router.get("/github", initiateGitHubAuth);
+router.get("/github/callback", handleGitHubCallback);
+router.post("/cli/callback", handleCLICallback);
+router.post("/refresh", refreshAccessToken);
+
+// logout requires a valid access token — you must be logged in to log out
+router.post("/logout", authenticate, logout);
+
+export default router;
+</file>
+
+<file path="src/services/github.services.ts">
+import axios from "axios";
+
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
+const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || "http://localhost:3000/auth/github/callback";
+
+
+export interface GitHubUser {
+  id: number;
+  login: string;
+  email: string | null;
+  avatar_url: string;
+  name: string | null;
+}
+
+interface GitHubTokenResponse {
+  access_token: string;
+  token_type: string;
+  scope: string;
+  error?: string;
+}
+
+
+interface GitHubEmail {
+  email: string;
+  primary: boolean;
+  verified: boolean;
+}
+
+export const buildAuthorizationUrl = (state: string, codeChallenge: string) => {
+    const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: GITHUB_REDIRECT_URI,
+    scope: "read:user user:email",
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+  });
+
+  return `https://github.com/login/oauth/authorize?${params.toString()}`;
+
+}
+
+
+// Step 2: Exchange authorization code for access token
+export const exchangeCodeForToken = async (
+  code: string,
+  codeVerifier: string
+): Promise<GitHubTokenResponse | null> => {
+  try {
+    const { data } = await axios.post<GitHubTokenResponse>(
+      "https://github.com/login/oauth/access_token",
+      {
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: GITHUB_REDIRECT_URI,
+        code_verifier: codeVerifier,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (data.error) return null;
+    return data;
+  } catch (error) {
+    console.error("Token exchange failed:", error);
+    return null;
+  }
+};
+
+
+export const fetchGitHubUser = async (accessToken: string): Promise<GitHubUser | null> => {
+  try {
+    const { data } = await axios.get<GitHubUser>("https://api.github.com/user", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    });
+
+    return data;
+  } catch (error) {
+    console.error("Failed to fetch GitHub user:", error);
+    return null;
+  }
+};
+
+
+
+// Step 4: Fetch user's primary email
+export const fetchGitHubEmail = async (accessToken: string): Promise<string | null> => {
+  try {
+    const { data: emails } = await axios.get<GitHubEmail[]>(
+      "https://api.github.com/user/emails",
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      }
+    );
+
+    const primary = emails.find((e) => e.primary && e.verified);
+    return primary?.email || emails[0]?.email || null;
+  } catch (error) {
+    console.error("Failed to fetch GitHub email:", error);
+    return null;
+  }
+};
+</file>
+
 <file path="src/utils/apperror.utils.ts">
 export class AppError extends Error {
   statusCode: number;
@@ -20747,6 +21173,48 @@ export const errorHandler = (err: unknown, req: Request, res: Response, next: Ne
 
   //other general error
   sendError(res, 500, "Internal server error");
+};
+</file>
+
+<file path="src/utils/jwt.utils.ts">
+import * as jwt from 'jsonwebtoken'
+
+const JWT_SECRET = process.env.JWT_SECRET || "default_secret";
+const JWT_REFRESH_SECRET =process.env.JWT_REFRESH_SECRET || "FALLBACK SECRET"
+
+export const generateAccessToken = (userId: string, role:string ): string => {
+    const options: jwt.SignOptions = { 
+    expiresIn: "3m"
+  };
+  
+  return jwt.sign({ userId, role }, JWT_SECRET, options);
+}
+
+
+export const generateRefreshToken = (userId: string): string => {
+    const options: jwt.SignOptions = { 
+    expiresIn: "5m"
+  };
+  
+  return jwt.sign({ userId }, JWT_REFRESH_SECRET, options);
+}
+
+// Verify access token
+export const verifyAccessToken = (token: string): { userId: string; role: string } | null => {
+  try {
+    return jwt.verify(token, JWT_SECRET) as { userId: string; role: string };
+  } catch {
+    return null;
+  }
+};
+
+
+export const verifyRefreshToken = (token: string): { userId: string } | null => {
+  try {
+    return jwt.verify(token, JWT_REFRESH_SECRET) as { userId: string };
+  } catch {
+    return null;
+  }
 };
 </file>
 
@@ -20944,6 +21412,32 @@ export const notFoundHandler = (req: Request, res: Response): void => {
 };
 </file>
 
+<file path="src/utils/pkce.utils.ts">
+import crypto from "crypto";
+
+export const generateCodeVerifier = (): string => {
+  const buffer = crypto.randomBytes(32);
+  return base64URLEncode(buffer);
+};
+
+export const generateCodeChallenge = (verifier: string): string => {
+  const hash = crypto.createHash("sha256").update(verifier).digest();
+  return base64URLEncode(hash);
+};
+
+export const generateState = (): string => {
+  return crypto.randomBytes(16).toString("hex");
+};
+
+const base64URLEncode = (buffer: Buffer): string => {
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+};
+</file>
+
 <file path="src/utils/response.utils.ts">
 // src/utils/response.utils.ts
 import { Response } from 'express';
@@ -20993,49 +21487,6 @@ export const sendError = (res: Response, statusCode: number, message: string): v
     "exclude": [
         "node_modules"
     ]
-}
-</file>
-
-<file path="prisma/schema.prisma">
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
-generator client {
-  provider = "prisma-client-js"
-
-}
-
-datasource db {
-  provider = "postgresql"
-}
-
-model Profile {
-  id                  String   @id
-  name                String   @unique
-  gender              String
-  gender_probability  Float
-  age                 Int
-  age_group           String
-  country_id          String
-  country_name        String
-  country_probability Float
-  created_at          DateTime @default(now())
-}
-
-
-model User {
-  id            String    @id
-  github_id     String    @unique
-  username      String
-  email         String
-  avatar_url    String
-  role          String    @default("analyst")
-  is_active     Boolean   @default(true)
-  refresh_token  String?
-  last_login_at DateTime?
-  created_at    DateTime  @default(now())
 }
 </file>
 
@@ -21428,6 +21879,7 @@ export const findAllProfiles = async (filters: ProfileFilters) => {
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.4.1",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
     "pg": "^8.20.0",
@@ -21447,6 +21899,49 @@ export const findAllProfiles = async (filters: ProfileFilters) => {
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
+}
+</file>
+
+<file path="prisma/schema.prisma">
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Profile {
+  id                  String   @id
+  name                String   @unique
+  gender              String
+  gender_probability  Float
+  age                 Int
+  age_group           String
+  country_id          String
+  country_name        String
+  country_probability Float
+  created_at          DateTime @default(now())
+}
+
+
+model User {
+  id            String    @id
+  github_id     String    @unique
+  username      String
+  email         String
+  avatar_url    String
+  role          String    @default("analyst")
+  is_active     Boolean   @default(true)
+  refresh_token  String?
+  last_login_at DateTime?
+  created_at    DateTime  @default(now())
 }
 </file>
 

@@ -5,6 +5,7 @@ import morgan from "morgan";
 import { notFoundHandler } from "../utils/notfound.utils";
 import { errorHandler } from "../utils/errorhandler.utils";
 import ProfileRouter from "../routes/profile.route"
+import AuthRouter from "../routes/auth.route"
 
 dotenv.config();
 
@@ -15,10 +16,9 @@ export const createApp = (): Application => {
 
   app.use(express.json())
 
-  // Use Morgan logger in development only
-  if (process.env.NODE_ENV !== 'production') {
-    app.use(morgan('dev'));
-  }
+
+  //Log every request including in production
+  app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 
 
   app.use(cors({ origin: "*" }));
@@ -26,8 +26,9 @@ export const createApp = (): Application => {
 
   //Routes
 
+  app.use("/auth", AuthRouter);
   app.use("/api/profiles", ProfileRouter)
- 
+
 
 
 
