@@ -119,6 +119,7 @@ export const handleGitHubCallback = async (
     next(error);
   }
 };
+// src/controllers/auth.controller.ts
 
 export const handleCLICallback = async (
   req: Request,
@@ -126,14 +127,14 @@ export const handleCLICallback = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { code, code_verifier } = req.body;
+    const { code, code_verifier, redirect_uri } = req.body;  // ← ADD redirect_uri
 
     if (!code || !code_verifier) {
       sendError(res, 400, "code and code_verifier are required");
       return;
     }
 
-    const tokenData = await exchangeCodeForToken(code, code_verifier);
+    const tokenData = await exchangeCodeForToken(code, code_verifier, redirect_uri); // ← PASS IT
     if (!tokenData) {
       sendError(res, 502, "Token exchange failed");
       return;
@@ -147,7 +148,6 @@ export const handleCLICallback = async (
     next(error);
   }
 };
-
 export const refreshAccessToken = async (
   req: Request,
   res: Response,

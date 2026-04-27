@@ -43,9 +43,12 @@ export const buildAuthorizationUrl = (state: string, codeChallenge: string) => {
 
 
 // Step 2: Exchange authorization code for access token
+
+
 export const exchangeCodeForToken = async (
   code: string,
-  codeVerifier: string
+  codeVerifier: string,
+  redirectUri?: string                              // ← ADD THIS
 ): Promise<GitHubTokenResponse | null> => {
   try {
     const { data } = await axios.post<GitHubTokenResponse>(
@@ -54,7 +57,7 @@ export const exchangeCodeForToken = async (
         client_id: GITHUB_CLIENT_ID,
         client_secret: GITHUB_CLIENT_SECRET,
         code,
-        redirect_uri: GITHUB_REDIRECT_URI,
+        redirect_uri: redirectUri ?? GITHUB_REDIRECT_URI, // ← USE PARAM, fall back to env
         code_verifier: codeVerifier,
       },
       {
