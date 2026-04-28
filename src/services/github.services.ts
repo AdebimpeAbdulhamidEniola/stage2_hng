@@ -18,6 +18,7 @@ interface GitHubTokenResponse {
   token_type: string;
   scope: string;
   error?: string;
+  error_description?: string;
 }
 
 
